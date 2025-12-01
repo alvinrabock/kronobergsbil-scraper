@@ -1,0 +1,988 @@
+"use server";
+import puppeteer from 'puppeteer';
+
+export interface ScrapedData {
+  title: string;
+  price?: string;
+  year?: string;
+  mileage?: string;
+  image?: string;
+  link?: string;
+  rawHtml?: string;
+  content?: string;
+}
+
+export interface LinkedContent {
+  url: string;
+  title: string;
+  content: string;
+  cleanedHtml: string;
+  linkText: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface PageInfo {
+  title: string;
+  description: string;
+  url: string;
+  scrapedAt: string;
+  contentLength: number;
+  cleanedContentLength: number;
+  linksFound: number;
+  linksFetched: number;
+}
+
+export interface ScrapeResult {
+  success: boolean;
+  url: string;
+  pageInfo: PageInfo;
+  cleanedHtml: string;
+  structuredData: ScrapedData[];
+  linkedContent: LinkedContent[];
+  thumbnail?: string;
+  formattedOutput?: string;
+  error?: string;
+}
+
+// Helper function to create formatted output with proper tags
+export async function formatScrapedContent(result: ScrapeResult): Promise<string> {
+  if (!result.success) {
+    return `<!-- SCRAPING FAILED -->\n<!-- URL: ${result.url} -->\n<!-- ERROR: ${result.error} -->\n`;
+  }
+
+  let combinedHtml = '';
+  
+  // Add main page content
+  combinedHtml += `<!-- MAIN PAGE CONTENT START -->\n`;
+  combinedHtml += result.cleanedHtml;
+  combinedHtml += `\n<!-- MAIN PAGE CONTENT END -->\n\n`;
+
+  // Add linked content with proper formatting and end tags
+  if (result.linkedContent && result.linkedContent.length > 0) {
+    const successfulLinks = result.linkedContent.filter(lc => lc.success);
+    if (successfulLinks.length > 0) {
+      combinedHtml += `<!-- LÄNKAT INNEHÅLL (${successfulLinks.length} sidor) -->\n\n`;
+      
+      result.linkedContent.forEach((link, index) => {
+        if (link.success) {
+          combinedHtml += `<!-- LINKED PAGE ${index + 1} START -->\n`;
+          combinedHtml += `<!-- LINK TEXT: ${link.linkText} -->\n`;
+          combinedHtml += `<!-- URL: ${link.url} -->\n`;
+          combinedHtml += `<!-- TITLE: ${link.title} -->\n`;
+          combinedHtml += `<!-- CONTENT START -->\n`;
+          combinedHtml += link.cleanedHtml;
+          combinedHtml += `\n<!-- CONTENT END -->\n`;
+          combinedHtml += `<!-- LINKED PAGE ${index + 1} END -->\n\n`;
+        }
+      });
+    }
+  }
+
+  return combinedHtml;
+}
+
+export async function scrapeWebsite(url: string, fetchLinks = true): Promise<ScrapeResult> {
+  const browser = await puppeteer.launch({ headless: true });
+  const page = await browser.newPage();
+
+  try {
+    console.log(`Starting scrape of: ${url}`);
+    
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    );
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'sv-SE,sv;q=0.9,en;q=0.8' });
+    
+    console.log('Navigating to page...');
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    
+    console.log('Page loaded successfully');
+
+    // Original HTML
+    const originalHtml: string = await page.content();
+    console.log(`Original HTML length: ${originalHtml.length}`);
+    
+    if (!originalHtml || originalHtml.length < 100) {
+      throw new Error(`Page content too short or empty: ${originalHtml.length} characters`);
+    }
+
+    // Main content extraction - same logic as Cheerio version
+    const mainContent = await page.evaluate(() => {
+      console.log('Starting content extraction...');
+      const contentSelectors = [
+        'main',
+        '#main', 
+        '.main-section',
+        '[role="main"]',
+        'section.main-section',
+        'article',
+        '.content',
+        '#content',
+        '.page-content',
+        'body'
+      ];
+
+      let content = '';
+      
+      for (const selector of contentSelectors) {
+        const element = document.querySelector(selector);
+        if (element) {
+          content = element.innerHTML;
+          console.log(`Found content using selector: ${selector}, length: ${content.length}`);
+          break;
+        }
+      }
+      
+      // If no main content found, get everything from body
+      if (!content) {
+        content = document.body?.innerHTML || '';
+        console.log(`Fallback to body content, length: ${content.length}`);
+      }
+      
+      return content;
+    });
+
+    console.log(`Main content extracted, length: ${mainContent.length}`);
+    
+    if (!mainContent || mainContent.length < 50) {
+      throw new Error(`Main content too short: ${mainContent.length} characters`);
+    }
+
+    // Apply the exact same cleaning logic as the working Cheerio version
+    const cleanedHtml = await page.evaluate((html: string, baseUrl: string) => {
+      console.log('Starting HTML cleaning...');
+      if (!html) {
+        console.log('No HTML to clean');
+        return '';
+      }
+      
+      // Create a temporary div to work with the HTML
+      const tempDiv = document.createElement('div');
+      tempDiv.innerHTML = html;
+      
+      console.log('HTML loaded into temp div');
+      
+      // Remove only truly unnecessary elements
+      const unwantedSelectors = [
+        'script', 'style', 'noscript', 'link[rel="stylesheet"]', 'svg', 'path'
+      ];
+      
+      unwantedSelectors.forEach(selector => {
+        const elements = tempDiv.querySelectorAll(selector);
+        console.log(`Removing ${elements.length} ${selector} elements`);
+        elements.forEach(el => el.remove());
+      });
+      
+      // Remove meta tags except description (handle separately since != selector doesn't work)
+      tempDiv.querySelectorAll('meta').forEach(meta => {
+        const name = meta.getAttribute('name');
+        if (name && name !== 'description') {
+          meta.remove();
+        }
+      });
+      
+      // Handle each element type specifically to preserve important attributes
+      const allElements = tempDiv.querySelectorAll('*');
+      console.log(`Processing ${allElements.length} elements for attribute cleaning`);
+      
+      allElements.forEach((elem, index) => {
+        if (index % 100 === 0) {
+          console.log(`Processing element ${index}/${allElements.length}`);
+        }
+        
+        if (elem.tagName === 'IMG') {
+          // For images, preserve essential image attributes
+          let src = elem.getAttribute('src') || elem.getAttribute('data-src') || elem.getAttribute('data-lazy-src');
+          let srcset = elem.getAttribute('srcset');
+          const alt = elem.getAttribute('alt') || '';
+          
+          // Handle Next.js images - extract the actual image URL
+          if (src && src.includes('/_next/image/') && src.includes('url=')) {
+            const urlMatch = src.match(/url=([^&]+)/);
+            if (urlMatch) {
+              src = decodeURIComponent(urlMatch[1]);
+              console.log(`Decoded Next.js image: ${src}`);
+            }
+          }
+          
+          // Resolve relative URLs to absolute URLs
+          if (src && src.startsWith('/') && baseUrl) {
+            try {
+              const urlBase = new URL(baseUrl);
+              src = `${urlBase.protocol}//${urlBase.host}${src}`;
+            } catch (e) {
+              console.log('Failed to resolve relative URL:', src);
+            }
+          }
+          
+          // Resolve relative URLs in srcset
+          if (srcset && baseUrl) {
+            const srcsetParts = srcset.split(',').map(part => {
+              const trimmed = part.trim();
+              let [url, descriptor] = trimmed.split(/\s+/);
+              
+              // Handle Next.js URLs in srcset
+              if (url.includes('/_next/image/') && url.includes('url=')) {
+                const urlMatch = url.match(/url=([^&]+)/);
+                if (urlMatch) {
+                  url = decodeURIComponent(urlMatch[1]);
+                }
+              }
+              
+              if (url.startsWith('/')) {
+                try {
+                  const urlBase = new URL(baseUrl);
+                  const absoluteUrl = `${urlBase.protocol}//${urlBase.host}${url}`;
+                  return descriptor ? `${absoluteUrl} ${descriptor}` : absoluteUrl;
+                } catch (e) {
+                  return trimmed;
+                }
+              }
+              return trimmed;
+            });
+            srcset = srcsetParts.join(', ');
+          }
+          
+          // Remove all attributes
+          const attributes = Array.from(elem.attributes);
+          attributes.forEach(attr => elem.removeAttribute(attr.name));
+          
+          // Add back essential ones, but skip broken placeholder images
+          if (src && !src.includes('data:image/gif;base64') && !src.includes('placeholder')) {
+            elem.setAttribute('src', src);
+            if (srcset) elem.setAttribute('srcset', srcset);
+            elem.setAttribute('alt', alt);
+          } else {
+            // Remove broken/placeholder images
+            elem.remove();
+            return;
+          }
+        }
+        else if (elem.tagName === 'A') {
+          // For links, preserve only href and resolve relative URLs
+          let href = elem.getAttribute('href');
+          
+          // Resolve relative URLs to absolute URLs
+          if (href && href.startsWith('/') && baseUrl) {
+            try {
+              const urlBase = new URL(baseUrl);
+              href = `${urlBase.protocol}//${urlBase.host}${href}`;
+            } catch (e) {
+              // Keep original href if URL parsing fails
+            }
+          }
+          
+          // Remove all attributes
+          const attributes = Array.from(elem.attributes);
+          attributes.forEach(attr => elem.removeAttribute(attr.name));
+          
+          // Add back href if it exists
+          if (href) elem.setAttribute('href', href);
+        }
+        else {
+          // For all other elements, remove only the unwanted attributes
+          const removeAttrs = [
+            'class', 'id', 'style',
+            'data-dtm', 'data-gtm-event', 'data-gtm-event-category', 
+            'data-gtm-event-action', 'data-gtm-event-label', 'data-persona',
+            'data-expander-when', 'data-expander-content', 'data-expander-header',
+            'data-aspect-ratio', 'sizes', 'decoding', 'loading', 'data-mode',
+            'data-group', 'data-hs-cf-bound', 'anchor-name', 'draggable',
+            'rel', 'disabled', 'fill', 'xmlns', 'width', 'height',
+            'role', 'aria-label', 'aria-hidden', 'tabindex', 'onclick', 'onload'
+          ];
+          
+          removeAttrs.forEach(attr => elem.removeAttribute(attr));
+        }
+      });
+      
+      console.log('Attribute cleaning completed');
+      
+      // Remove empty paragraphs and containers - multiple passes to catch nested empties
+      for (let pass = 0; pass < 3; pass++) {
+        console.log(`Empty element removal pass ${pass + 1}`);
+        const emptyElements = tempDiv.querySelectorAll('p, span, div, section, figure, article, ul, li, button');
+        let removedCount = 0;
+        emptyElements.forEach(elem => {
+          const text = elem.textContent?.trim() || '';
+          const hasImage = elem.querySelector('img');
+          const hasInput = elem.querySelector('input, textarea, select');
+          const hasLink = elem.tagName.toLowerCase() === 'a' && elem.getAttribute('href');
+          
+          // Remove if empty and not an image, input, or meaningful link
+          if (!text && !hasImage && !hasInput && !hasLink && elem.children.length === 0) {
+            elem.remove();
+            removedCount++;
+          }
+          // Also remove containers that only contain other empty containers
+          else if (!text && !hasImage && !hasInput && !hasLink && elem.children.length > 0) {
+            const hasNonEmptyChild = Array.from(elem.children).some(child => {
+              return child.textContent?.trim() || 
+                     child.querySelector('img, input, textarea, select') ||
+                     (child.tagName.toLowerCase() === 'a' && child.getAttribute('href'));
+            });
+            if (!hasNonEmptyChild) {
+              elem.remove();
+              removedCount++;
+            }
+          }
+        });
+        console.log(`Removed ${removedCount} empty elements in pass ${pass + 1}`);
+        if (removedCount === 0) break; // No more empty elements found
+      }
+      
+      let result = tempDiv.innerHTML;
+      
+      // Basic formatting cleanup
+      result = result
+        .replace(/\n\s*\n/g, '\n')
+        .replace(/\s+/g, ' ')
+        .replace(/>\s+</g, '><')
+        .replace(/&nbsp;/g, ' ')
+        .trim();
+      
+      console.log(`Cleaning completed, final length: ${result.length}`);
+      return result;
+    }, mainContent, url);
+
+    console.log(`HTML cleaned, length: ${cleanedHtml.length}`);
+    
+    if (!cleanedHtml || cleanedHtml.length < 20) {
+      console.warn('Cleaned HTML is very short, but proceeding...');
+    }
+
+    // Meta info
+    const pageInfo = await page.evaluate(() => ({
+      title: document.title,
+      description: document.querySelector('meta[name="description"]')?.getAttribute('content') || '',
+      url: window.location.href,
+      scrapedAt: new Date().toISOString()
+    }));
+
+    console.log(`Page info extracted: ${pageInfo.title}`);
+
+    // Find best thumbnail with improved selection
+    const bestThumbnail: string | undefined = await page.evaluate((baseUrl: string) => {
+      try {
+        const images: Array<{src: string, score: number}> = [];
+        
+        document.querySelectorAll('img').forEach(img => {
+          let src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || '';
+          
+          // Skip placeholder/broken images
+          if (!src || 
+              src.includes('data:image/gif;base64') || 
+              src.includes('placeholder') || 
+              src.length < 10) {
+            return;
+          }
+          
+          // Resolve relative URLs
+          if (src.startsWith('/')) {
+            try {
+              const urlBase = new URL(baseUrl);
+              src = `${urlBase.protocol}//${urlBase.host}${src}`;
+            } catch (e) {
+              return;
+            }
+          }
+          
+          // Score images based on various factors
+          let score = 0;
+          
+          // Prefer images with car/vehicle related keywords
+          if (src.toLowerCase().includes('car') || 
+              src.toLowerCase().includes('vehicle') || 
+              src.toLowerCase().includes('auto') ||
+              src.toLowerCase().includes('bil')) {
+            score += 10;
+          }
+          
+          // Prefer larger images
+          if (src.includes('_large') || src.includes('_big') || src.includes('1920x') || src.includes('1200x')) {
+            score += 5;
+          }
+          
+          // Prefer JPG/PNG/WEBP
+          if (src.toLowerCase().match(/\.(jpg|jpeg|png|webp)$/)) {
+            score += 2;
+          }
+          
+          // Prefer images in main content areas
+          if (img.closest('main, article, .content, section')) {
+            score += 3;
+          }
+          
+          images.push({ src, score });
+        });
+        
+        // Sort by score and return the best one
+        images.sort((a, b) => b.score - a.score);
+        return images.length > 0 ? images[0].src : undefined;
+      } catch (e) {
+        console.log('Error finding thumbnail:', e);
+        return undefined;
+      }
+    }, url);
+
+    console.log(`Thumbnail found: ${bestThumbnail || 'None'}`);
+
+    // Find links in main content using the same logic as Cheerio version
+    let foundLinks: { url: string; text: string }[] = [];
+    if (fetchLinks) {
+      console.log('Starting link extraction...');
+      try {
+        foundLinks = await page.evaluate((baseUrl: string) => {
+          const links: { url: string; text: string }[] = [];
+          
+          // Look for links in main content areas only
+          const contentAreas = ['main', 'article', '.content', '.main-content', '#main', '#content'];
+          
+          let searchArea = document.body;
+          for (const area of contentAreas) {
+            const areaElement = document.querySelector(area);
+            if (areaElement) {
+              searchArea = areaElement as HTMLElement;
+              console.log(`Using search area: ${area}`);
+              break;
+            }
+          }
+          
+          // Find all links in the search area
+          searchArea.querySelectorAll('a[href]').forEach(link => {
+            const href = link.getAttribute('href');
+            let linkText = link.textContent?.trim();
+            
+            // If no direct text, try to get text from child elements
+            if (!linkText) {
+              const childText = link.querySelector('span, div, .title, .label');
+              linkText = childText?.textContent?.trim() || '';
+            }
+            
+            // Skip if no href or text
+            if (!href || !linkText || linkText.length < 3) {
+              return;
+            }
+            
+            // Handle internal links
+            let fullUrl = href;
+            let isRelevantLink = false;
+            
+            if (href.startsWith('/')) {
+              try {
+                const urlBase = new URL(baseUrl);
+                fullUrl = `${urlBase.protocol}//${urlBase.host}${href}`;
+                isRelevantLink = true;
+              } catch (e) {
+                return;
+              }
+            }
+            // Check if it's an external brand link
+            else if (href.startsWith('http')) {
+              isRelevantLink = href.includes('suzuki') ||
+                              href.includes('toyota') ||
+                              href.includes('bmw') ||
+                              href.includes('mercedes') ||
+                              href.includes('audi') ||
+                              href.includes('volvo') ||
+                              href.includes('ford') ||
+                              href.includes(new URL(baseUrl).hostname);
+              fullUrl = href;
+            }
+            
+            // Skip if not relevant
+            if (!isRelevantLink) {
+              return;
+            }
+            
+            // Skip fragment links and home page
+            if (href === '/' || href.startsWith('#')) {
+              return;
+            }
+            
+            // Skip common utility patterns
+            const skipPatterns = [
+              '/search', '/sok', '/login', '/logga-in', '/register', '/registrera',
+              '/cart', '/varukorg', '/checkout', '/kassa', '/account', '/konto',
+              '/profile', '/profil', '/settings', '/installningar', '/help', '/hjalp',
+              '/support', '/contact', '/kontakt', '/about', '/om', '/privacy', '/integritet',
+              '/terms', '/villkor', '/cookies', '/sitemap', '/rss', '/feed', '/api/',
+              '.pdf', '.doc', '.zip', '/karriar', '/jobb', '/press', '/investor'
+            ];
+            
+            const shouldSkip = skipPatterns.some(pattern => 
+              href.toLowerCase().includes(pattern.toLowerCase())
+            );
+            if (shouldSkip) return;
+            
+            // Skip generic/low-quality link text
+            const lowQualityPatterns = [
+              /^(läs mer|read more|more|mer)$/i,
+              /^(här|here)$/i,
+              /^(klicka|click)$/i,
+              /^(visa|show|view)$/i,
+              /^(gå till|go to)$/i,
+              /^(se|see)$/i,
+              /^\d+$/,
+              /^.{1,2}$/
+            ];
+            
+            const isLowQuality = lowQualityPatterns.some(pattern => 
+              pattern.test(linkText.trim())
+            );
+            if (isLowQuality) return;
+            
+            try {
+              const linkUrlNormalized = new URL(fullUrl).href;
+              const mainUrlNormalized = new URL(baseUrl).href;
+              
+              // Skip if same as main page or already added
+              if (linkUrlNormalized !== mainUrlNormalized && 
+                  !links.some(link => new URL(link.url).href === linkUrlNormalized)) {
+                links.push({ url: fullUrl, text: linkText });
+              }
+            } catch (e) {
+              // Skip invalid URLs
+            }
+          });
+          
+          return links.slice(0, 20);
+        }, url);
+        console.log(`Found ${foundLinks.length} links`);
+      } catch (error) {
+        console.error('Error during link extraction:', error);
+        foundLinks = [];
+      }
+    }
+
+    // Extract structured data
+    const structuredData: ScrapedData[] = await page.evaluate((pageUrl: string) => {
+      function extractPrice(text: string): string {
+        const pricePatterns = [
+          /\d{1,3}[\s,]*\d{3}[\s]*kr/i,
+          /\d{1,3}[\s,]*\d{3}[\s]*SEK/i,
+          /\d{1,3}[\s,]*\d{3}[\s]*:-/i,
+          /kr[\s]*\d{1,3}[\s,]*\d{3}/i,
+          /från[\s]*\d{1,3}[\s,]*\d{3}[\s]*kr/i,
+          /endast[\s]*\d{1,3}[\s,]*\d{3}[\s]*kr/i
+        ];
+        
+        for (const pattern of pricePatterns) {
+          const match = text.match(pattern);
+          if (match) return match[0];
+        }
+        return '';
+      }
+
+      function extractYear(text: string): string {
+        const match = text.match(/20(0[5-9]|1[0-9]|2[0-4])/);
+        return match ? match[0] : '';
+      }
+
+      function extractMileage(text: string): string {
+        const patterns = [
+          /\d{1,3}[\s,]*\d{3}[\s]*mil/i,
+          /\d{1,3}[\s,]*\d{3}[\s]*km/i,
+          /\d{1,6}[\s]*mil/i
+        ];
+        
+        for (const pattern of patterns) {
+          const match = text.match(pattern);
+          if (match) return match[0];
+        }
+        return '';
+      }
+
+      const containerSelectors = [
+        '.puffBlock-puff', '.puffBlock', '.fullwidthText',
+        '.product', '.item', '.listing', '.card', '.offer', '.vehicle', '.car',
+        '[class*="product"]', '[class*="item"]', '[class*="listing"]', 
+        '[class*="card"]', '[class*="offer"]', '[class*="vehicle"]', '[class*="car"]',
+        'article', '.result', '.entry', '.headline_text', '.responsive_image'
+      ];
+
+      const items: ScrapedData[] = [];
+
+      containerSelectors.forEach(selector => {
+        const elements = document.querySelectorAll(selector);
+        Array.from(elements).slice(0, 20).forEach(element => {
+          const text = element.textContent || '';
+          const html = element.innerHTML;
+          
+          if (text.trim().length > 50) {
+            // Extract image
+            let imageUrl = '';
+            const img = element.querySelector('img');
+            if (img) {
+              imageUrl = img.getAttribute('src') || 
+                        img.getAttribute('data-src') || 
+                        img.getAttribute('data-lazy-src') || '';
+              
+              if (imageUrl && imageUrl.startsWith('/')) {
+                try {
+                  const baseUrl = new URL(pageUrl);
+                  imageUrl = `${baseUrl.protocol}//${baseUrl.host}${imageUrl}`;
+                } catch (e) {
+                  imageUrl = '';
+                }
+              }
+              
+              if (imageUrl.includes('data:image/gif;base64') || 
+                  imageUrl.includes('placeholder')) {
+                imageUrl = '';
+              }
+            }
+
+            // Check for images in source elements
+            if (!imageUrl) {
+              const source = element.querySelector('source');
+              if (source) {
+                let srcset = source.getAttribute('srcset');
+                if (srcset) {
+                  const firstUrl = srcset.split(',')[0].trim().split(/\s+/)[0];
+                  if (firstUrl && firstUrl.startsWith('/')) {
+                    try {
+                      const baseUrl = new URL(pageUrl);
+                      imageUrl = `${baseUrl.protocol}//${baseUrl.host}${firstUrl}`;
+                    } catch (e) {
+                      imageUrl = firstUrl;
+                    }
+                  } else {
+                    imageUrl = firstUrl;
+                  }
+                }
+              }
+            }
+
+            const titleElement = element.querySelector('h1, h2, h3, h4, h5, .title, [class*="title"], [class*="headline"]');
+            const title = titleElement?.textContent?.trim() || text.split('\n')[0].trim().substring(0, 100);
+            
+            const linkElement = element.querySelector('a');
+            let link = linkElement?.getAttribute('href') || '';
+            
+            // Fix relative links
+            if (link && link.startsWith('/')) {
+              try {
+                const baseUrl = new URL(pageUrl);
+                link = `${baseUrl.protocol}//${baseUrl.host}${link}`;
+              } catch (e) {
+                // Keep original link if URL parsing fails
+              }
+            }
+
+            const item: ScrapedData = {
+              title: title,
+              rawHtml: html?.substring(0, 1000) || '',
+              content: text.trim().substring(0, 500),
+              image: imageUrl,
+              link: link,
+              price: extractPrice(text),
+              year: extractYear(text),
+              mileage: extractMileage(text)
+            };
+
+            if (item.title && item.title.length > 3) {
+              items.push(item);
+            }
+          }
+        });
+      });
+
+      // Remove duplicates
+      return items.filter((item, index, self) => 
+        index === self.findIndex(i => i.title === item.title && i.content === item.content)
+      );
+    }, url);
+
+    // Fetch linked content
+    let linkedContent: LinkedContent[] = [];
+    if (fetchLinks && foundLinks.length > 0) {
+      for (let i = 0; i < Math.min(foundLinks.length, 20); i++) {
+        const link = foundLinks[i];
+        try {
+          const subPage = await browser.newPage();
+          await subPage.goto(link.url, { waitUntil: 'domcontentloaded', timeout: 300000 });
+
+          // Extract content using same logic
+          const subContent = await subPage.evaluate(() => {
+            const contentSelectors = [
+              'main', '#main', '.main-section', '[role="main"]', 'section.main-section',
+              'article', '.content', '#content', '.page-content', 'body'
+            ];
+
+            let content = '';
+            for (const selector of contentSelectors) {
+              const element = document.querySelector(selector);
+              if (element) {
+                content = element.innerHTML;
+                break;
+              }
+            }
+            
+            if (!content) {
+              content = document.body.innerHTML;
+            }
+            
+            return content;
+          });
+
+          // Clean the content using same cleaning function but with size limits
+          const subHtml: string = await subPage.evaluate((html: string, baseUrl: string) => {
+            // Apply same cleaning logic as main page but with limits
+            if (!html) return '';
+            
+            const tempDiv = document.createElement('div');
+            tempDiv.innerHTML = html;
+            
+            // Same aggressive cleaning but track content size
+            const unwantedElements = tempDiv.querySelectorAll('script, style, noscript, link[rel="stylesheet"], svg, path, button[rel], button[disabled]');
+            unwantedElements.forEach(el => el.remove());
+            
+            // Clean images
+            const images = tempDiv.querySelectorAll('img');
+            images.forEach(img => {
+              let src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+              const alt = img.getAttribute('alt') || '';
+              
+              // Handle Next.js images
+              if (src && src.includes('/_next/image/') && src.includes('url=')) {
+                const urlMatch = src.match(/url=([^&]+)/);
+                if (urlMatch) {
+                  src = decodeURIComponent(urlMatch[1]);
+                }
+              }
+              
+              // Handle srcset
+              const srcset = img.getAttribute('srcset');
+              if (srcset && srcset.includes('/_next/image/')) {
+                const urls = srcset.split(',').map(s => {
+                  const url = s.trim().split(/\s+/)[0];
+                  if (url.includes('url=')) {
+                    const match = url.match(/url=([^&]+)/);
+                    return match ? decodeURIComponent(match[1]) : url;
+                  }
+                  return url;
+                });
+                if (!src && urls.length > 0) {
+                  src = urls[urls.length - 1];
+                }
+              }
+              
+              if (src && src.startsWith('/')) {
+                try {
+                  const base = new URL(baseUrl);
+                  src = `${base.protocol}//${base.host}${src}`;
+                } catch (e) {}
+              }
+              
+              Array.from(img.attributes).forEach(attr => img.removeAttribute(attr.name));
+              
+              if (src && !src.includes('data:image/gif;base64') && !src.includes('placeholder')) {
+                img.setAttribute('src', src);
+                img.setAttribute('alt', alt);
+              } else {
+                img.remove();
+              }
+            });
+            
+            // Clean links
+            const links = tempDiv.querySelectorAll('a');
+            links.forEach(link => {
+              let href = link.getAttribute('href');
+              
+              if (href && href.startsWith('/')) {
+                try {
+                  const base = new URL(baseUrl);
+                  href = `${base.protocol}//${base.host}${href}`;
+                } catch (e) {}
+              }
+              
+              Array.from(link.attributes).forEach(attr => link.removeAttribute(attr.name));
+              
+              if (href) {
+                link.setAttribute('href', href);
+              }
+            });
+            
+            // Remove all attributes from other elements
+            const allElements = tempDiv.querySelectorAll('*');
+            allElements.forEach(elem => {
+              if (elem.tagName === 'IMG' || elem.tagName === 'A') return;
+              
+              if (elem.tagName === 'INPUT') {
+                const type = elem.getAttribute('type');
+                const name = elem.getAttribute('name');
+                const value = elem.getAttribute('value');
+                const placeholder = elem.getAttribute('placeholder');
+                const required = elem.getAttribute('required');
+                
+                Array.from(elem.attributes).forEach(attr => elem.removeAttribute(attr.name));
+                
+                if (type) elem.setAttribute('type', type);
+                if (name) elem.setAttribute('name', name);
+                if (value) elem.setAttribute('value', value);
+                if (placeholder) elem.setAttribute('placeholder', placeholder);
+                if (required !== null) elem.setAttribute('required', '');
+              } else {
+                Array.from(elem.attributes).forEach(attr => elem.removeAttribute(attr.name));
+              }
+            });
+            
+            // Remove empty elements
+            for (let pass = 0; pass < 3; pass++) {
+              const emptyElements = tempDiv.querySelectorAll('div, section, figure, article, ul, li, button, span, p');
+              let removedCount = 0;
+              
+              emptyElements.forEach(elem => {
+                const text = elem.textContent?.trim() || '';
+                const hasImage = elem.querySelector('img');
+                const hasInput = elem.querySelector('input, textarea, select');
+                const hasLink = elem.querySelector('a[href]');
+                
+                if (!text && !hasImage && !hasInput && !hasLink && elem.children.length === 0) {
+                  elem.remove();
+                  removedCount++;
+                }
+              });
+              
+              if (removedCount === 0) break;
+            }
+            
+            let result = tempDiv.innerHTML;
+            result = result
+              .replace(/\n\s*\n/g, '\n')
+              .replace(/\s+/g, ' ')
+              .replace(/>\s+</g, '><')
+              .replace(/&nbsp;/g, ' ')
+              .replace(/&amp;/g, '&')
+              .trim();
+            
+            // IMPORTANT: Don't truncate linked content - let it be full length
+            console.log(`Linked page cleaning completed, length: ${result.length}`);
+            return result;
+          }, subContent, link.url);
+
+          const subTitle = await subPage.title();
+          const subBody = await subPage.evaluate(() => 
+            document.body?.innerText?.replace(/\s+/g, ' ').trim().slice(0, 5000) || ''
+          );
+
+          linkedContent.push({ 
+            url: link.url, 
+            title: subTitle, 
+            content: subBody, 
+            cleanedHtml: subHtml, 
+            linkText: link.text, 
+            success: true 
+          });
+          
+          await subPage.close();
+          await new Promise(resolve => setTimeout(resolve, 750));
+        } catch (error: any) {
+          linkedContent.push({ 
+            url: link.url, 
+            title: '', 
+            content: '', 
+            cleanedHtml: '', 
+            linkText: link.text, 
+            success: false, 
+            error: error.message 
+          });
+        }
+      }
+    }
+
+    await page.close();
+    await browser.close();
+
+    console.log('Building final result object...');
+    
+    const info: PageInfo = { 
+      ...pageInfo, 
+      contentLength: originalHtml.length, 
+      cleanedContentLength: cleanedHtml.length, 
+      linksFound: foundLinks.length, 
+      linksFetched: linkedContent.filter(lc => lc.success).length 
+    };
+
+    // Build the final combined HTML with the EXACT same delimiters as Cheerio version
+    let combinedHtml = '';
+    
+    // Add main page content with delimiter
+    combinedHtml += '<!-- MAIN PAGE CONTENT START -->\n';
+    combinedHtml += cleanedHtml;
+    combinedHtml += '\n<!-- MAIN PAGE CONTENT END -->\n\n';
+
+    // Add linked content with much clearer delimiters - EXACT same format as Cheerio
+    if (linkedContent.length > 0) {
+      const successfulLinks = linkedContent.filter(lc => lc.success);
+      combinedHtml += `<!-- LINKED CONTENT START - ${successfulLinks.length} PAGES -->\n\n`;
+      
+      linkedContent.forEach((link, index) => {
+        if (link.success) {
+          combinedHtml += `<!-- LINKED PAGE ${index + 1} START -->\n`;
+          combinedHtml += `<!-- LINK TEXT: ${link.linkText} -->\n`;
+          combinedHtml += `<!-- URL: ${link.url} -->\n`;
+          combinedHtml += `<!-- TITLE: ${link.title} -->\n`;
+          combinedHtml += `<!-- CONTENT START -->\n`;
+          combinedHtml += link.cleanedHtml;
+          combinedHtml += `\n<!-- CONTENT END -->\n`;
+          combinedHtml += `<!-- LINKED PAGE ${index + 1} END -->\n\n`;
+        }
+      });
+      
+      combinedHtml += `<!-- LINKED CONTENT END -->\n`;
+    }
+
+    console.log(`Combined HTML built with ${linkedContent.filter(lc => lc.success).length} linked pages`);
+
+    const result: ScrapeResult = { 
+      success: true, 
+      url, 
+      pageInfo: info, 
+      cleanedHtml: combinedHtml, // Use the properly formatted combined HTML
+      structuredData, 
+      linkedContent, 
+      thumbnail: bestThumbnail 
+    };
+
+    console.log('✅ Scraping completed successfully');
+    console.log(`Final stats: Original: ${originalHtml.length}, Cleaned: ${cleanedHtml.length}, Links: ${foundLinks.length}, Structured items: ${structuredData.length}`);
+
+    return result;
+
+  } catch (error: any) {
+    console.error('❌ Scraping failed with error:', error);
+    
+    // Ensure browser is closed even on error
+    try {
+      await page.close();
+      await browser.close();
+    } catch (cleanupError) {
+      console.error('Error closing browser:', cleanupError);
+    }
+    
+    const errorResult: ScrapeResult = {
+      success: false,
+      url,
+      pageInfo: { 
+        title: '', 
+        description: '', 
+        url, 
+        scrapedAt: new Date().toISOString(), 
+        contentLength: 0, 
+        cleanedContentLength: 0, 
+        linksFound: 0, 
+        linksFetched: 0 
+      },
+      cleanedHtml: '',
+      structuredData: [],
+      linkedContent: [],
+      error: error?.message || 'Failed to scrape website'
+    };
+    
+    console.log('Returning error result:', errorResult.error);
+    return errorResult;
+  }
+}
