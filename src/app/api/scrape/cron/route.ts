@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { scrapeWebsite, formatScrapedContent } from '@/lib/scraper'
 import { processHtmlWithSmartFactCheck } from '@/lib/ai-processor'
 import { ScrapeService } from '@/lib/database/scrapeService'
+import { syncVehiclesToMaster } from '@/lib/master-sync-service'
 
 export async function POST(request: NextRequest) {
   try {
@@ -92,6 +93,8 @@ export async function POST(request: NextRequest) {
     let totalItems = 0
     let successItems = 0
 
+    let masterSyncResult = null
+
     if (aiResult.success && aiResult.data) {
       // Save specific data based on content type
       if (aiResult.content_type === 'campaigns' && aiResult.campaigns) {
@@ -102,10 +105,20 @@ export async function POST(request: NextRequest) {
         await scrapeService.saveVehicles(sessionId, aiResultId, aiResult.cars, 'cars')
         totalItems = aiResult.cars.length
         successItems = aiResult.cars.length
+
+        // Sync to master database (update prices for existing master records)
+        console.log(`🔄 [CRON] Syncing ${aiResult.cars.length} vehicles to master database...`)
+        masterSyncResult = await syncVehiclesToMaster(aiResult.cars, url)
+        console.log(`🔄 [CRON] Master sync: ${masterSyncResult.pricesUpdated} prices updated, ${masterSyncResult.notFoundInMaster} not in master`)
       } else if (aiResult.content_type === 'transport_cars' && aiResult.transport_cars) {
         await scrapeService.saveVehicles(sessionId, aiResultId, aiResult.transport_cars, 'transport_cars')
         totalItems = aiResult.transport_cars.length
         successItems = aiResult.transport_cars.length
+
+        // Sync to master database (update prices for existing master records)
+        console.log(`🔄 [CRON] Syncing ${aiResult.transport_cars.length} transport vehicles to master database...`)
+        masterSyncResult = await syncVehiclesToMaster(aiResult.transport_cars, url)
+        console.log(`🔄 [CRON] Master sync: ${masterSyncResult.pricesUpdated} prices updated, ${masterSyncResult.notFoundInMaster} not in master`)
       }
     }
 
@@ -144,7 +157,13 @@ export async function POST(request: NextRequest) {
         totalItems,
         successItems,
         processingTimeMs: processingTime
-      }
+      },
+      // Master database sync results
+      masterSync: masterSyncResult ? {
+        pricesUpdated: masterSyncResult.pricesUpdated,
+        notFoundInMaster: masterSyncResult.notFoundInMaster,
+        errors: masterSyncResult.errors.length > 0 ? masterSyncResult.errors : undefined
+      } : null
     })
 
   } catch (error) {
