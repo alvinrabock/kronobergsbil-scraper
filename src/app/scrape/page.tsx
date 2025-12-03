@@ -3,6 +3,7 @@
 import { Suspense } from 'react';
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { useAuth } from '@/lib/auth/AuthProvider';
 import ScrapeClient from './ScrapeClient';
 import Header from '@/components/Header';
@@ -39,9 +40,17 @@ export default function ScrapePage() {
       
       {/* Main content */}
       <div className="container mx-auto px-4 py-8">
-        <h1 className="text-3xl font-bold text-center mb-8">
-          Website Scraper
-        </h1>
+        <div className="flex justify-between items-center mb-8">
+          <h1 className="text-3xl font-bold">
+            Website Scraper
+          </h1>
+          <Link
+            href="/catalog"
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center gap-2"
+          >
+            <span>📚</span> Fordonskatalog
+          </Link>
+        </div>
 
         <div className="w-full mx-auto">
           <Suspense fallback={<div>Loading scraper...</div>}>

@@ -52,14 +52,23 @@ interface Vehicle {
     };
 }
 
+interface MasterMatch {
+    matched: boolean;
+    master_vehicle_id?: string;
+    master_variant_id?: string;
+    confidence?: number;
+}
+
 interface VehicleCardProps {
     vehicle: Vehicle;
     leasingMode?: 'all' | 'privat-leasing' | 'foretag-leasing' | 'purchase' | 'leasing';
+    masterMatch?: MasterMatch;
 }
 
 const VehicleCard: React.FC<VehicleCardProps> = ({
     vehicle,
-    leasingMode = 'all'
+    leasingMode = 'all',
+    masterMatch
 }) => {
     const [isExpanded, setIsExpanded] = useState(false);
 
@@ -221,6 +230,17 @@ const VehicleCard: React.FC<VehicleCardProps> = ({
                             {vehicle.body_type && (
                                 <span className="inline-block px-2 py-0.5 bg-purple-100 text-purple-800 rounded text-sm font-medium capitalize">
                                     {vehicle.body_type}
+                                </span>
+                            )}
+                            {/* Master DB match indicator */}
+                            {masterMatch?.matched && (
+                                <span className="inline-block px-2 py-0.5 bg-green-100 text-green-800 rounded text-sm font-medium" title="Finns i master-databasen">
+                                    ✓ Master DB
+                                </span>
+                            )}
+                            {masterMatch && !masterMatch.matched && (
+                                <span className="inline-block px-2 py-0.5 bg-orange-100 text-orange-800 rounded text-sm font-medium" title="Saknas i master-databasen">
+                                    ⚠ Ej i Master
                                 </span>
                             )}
                         </div>
