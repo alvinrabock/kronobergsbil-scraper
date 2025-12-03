@@ -99,15 +99,18 @@ CREATE TABLE campaigns (
 CREATE TABLE campaign_vehicle_models (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   campaign_id UUID REFERENCES campaigns(id) ON DELETE CASCADE,
-  
+
   name TEXT NOT NULL,
   price DECIMAL(12,2),
   old_price DECIMAL(12,2),
   privatleasing DECIMAL(12,2),
+  old_privatleasing DECIMAL(12,2),
   company_leasing_price DECIMAL(12,2),
+  old_company_leasing_price DECIMAL(12,2),
   loan_price DECIMAL(12,2),
+  old_loan_price DECIMAL(12,2),
   thumbnail_url TEXT,
-  
+
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -148,14 +151,18 @@ CREATE TABLE vehicle_models (
   price DECIMAL(12,2),
   old_price DECIMAL(12,2),
   privatleasing DECIMAL(12,2),
+  old_privatleasing DECIMAL(12,2),
   company_leasing_price DECIMAL(12,2),
+  old_company_leasing_price DECIMAL(12,2),
   loan_price DECIMAL(12,2),
+  old_loan_price DECIMAL(12,2),
   thumbnail_url TEXT,
 
   -- Vehicle specifications
   bransle TEXT,  -- Fuel type: El, Bensin, Diesel, Hybrid, Laddhybrid
   biltyp TEXT,   -- Vehicle type: suv, sedan, kombi, halvkombi, cab, coupe, minibuss, pickup, transportbil
   vaxellada TEXT, -- Transmission: Automat, Manuell
+  utrustning TEXT[],  -- Equipment list for this trim level
 
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -164,6 +171,13 @@ CREATE TABLE vehicle_models (
 -- ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS bransle TEXT;
 -- ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS biltyp TEXT;
 -- ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS vaxellada TEXT;
+-- ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS utrustning TEXT[];
+-- ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS old_privatleasing DECIMAL(12,2);
+-- ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS old_company_leasing_price DECIMAL(12,2);
+-- ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS old_loan_price DECIMAL(12,2);
+-- ALTER TABLE campaign_vehicle_models ADD COLUMN IF NOT EXISTS old_privatleasing DECIMAL(12,2);
+-- ALTER TABLE campaign_vehicle_models ADD COLUMN IF NOT EXISTS old_company_leasing_price DECIMAL(12,2);
+-- ALTER TABLE campaign_vehicle_models ADD COLUMN IF NOT EXISTS old_loan_price DECIMAL(12,2);
 
 -- Linked content table - stores content from followed links
 CREATE TABLE linked_content (

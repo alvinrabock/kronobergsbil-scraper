@@ -315,8 +315,11 @@ export interface Database {
           price: number | null
           old_price: number | null
           privatleasing: number | null
+          old_privatleasing: number | null
           company_leasing_price: number | null
+          old_company_leasing_price: number | null
           loan_price: number | null
+          old_loan_price: number | null
           thumbnail_url: string | null
           created_at: string
         }
@@ -327,8 +330,11 @@ export interface Database {
           price?: number | null
           old_price?: number | null
           privatleasing?: number | null
+          old_privatleasing?: number | null
           company_leasing_price?: number | null
+          old_company_leasing_price?: number | null
           loan_price?: number | null
+          old_loan_price?: number | null
           thumbnail_url?: string | null
           created_at?: string
         }
@@ -339,8 +345,11 @@ export interface Database {
           price?: number | null
           old_price?: number | null
           privatleasing?: number | null
+          old_privatleasing?: number | null
           company_leasing_price?: number | null
+          old_company_leasing_price?: number | null
           loan_price?: number | null
+          old_loan_price?: number | null
           thumbnail_url?: string | null
           created_at?: string
         }
@@ -353,8 +362,11 @@ export interface Database {
           price: number | null
           old_price: number | null
           privatleasing: number | null
+          old_privatleasing: number | null
           company_leasing_price: number | null
+          old_company_leasing_price: number | null
           loan_price: number | null
+          old_loan_price: number | null
           thumbnail_url: string | null
           bransle: string | null
           biltyp: string | null
@@ -369,8 +381,11 @@ export interface Database {
           price?: number | null
           old_price?: number | null
           privatleasing?: number | null
+          old_privatleasing?: number | null
           company_leasing_price?: number | null
+          old_company_leasing_price?: number | null
           loan_price?: number | null
+          old_loan_price?: number | null
           thumbnail_url?: string | null
           bransle?: string | null
           biltyp?: string | null
@@ -385,8 +400,11 @@ export interface Database {
           price?: number | null
           old_price?: number | null
           privatleasing?: number | null
+          old_privatleasing?: number | null
           company_leasing_price?: number | null
+          old_company_leasing_price?: number | null
           loan_price?: number | null
+          old_loan_price?: number | null
           thumbnail_url?: string | null
           bransle?: string | null
           biltyp?: string | null
