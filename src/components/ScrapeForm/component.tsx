@@ -153,9 +153,9 @@ export default function ScrapeForm({ onScrapeMultiple, loading }: ScrapeFormProp
   const categoryStats = getCategoryStats();
 
   return (
-    <div className="bg-white p-6 rounded-lg shadow-md">
+    <div className="bg-white p-6 rounded-lg shadow-md text-gray-900">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold">Automotive Content Scraper</h2>
+        <h2 className="text-xl font-semibold text-gray-900">Automotive Content Scraper</h2>
         <div className="text-sm text-gray-600">
           Total valid URLs: {validUrlCount}
         </div>
@@ -217,7 +217,7 @@ export default function ScrapeForm({ onScrapeMultiple, loading }: ScrapeFormProp
                             value={item.label}
                             onChange={(e) => updateUrlItem(item.originalIndex, 'label', e.target.value)}
                             placeholder="Label (optional)"
-                            className="w-full px-2 py-1 border border-gray-300 rounded text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            className="w-full px-2 py-1 border border-gray-300 rounded text-xs text-gray-900 bg-white focus:outline-none focus:ring-1 focus:ring-blue-500"
                             disabled={loading}
                           />
                           <input
@@ -225,8 +225,8 @@ export default function ScrapeForm({ onScrapeMultiple, loading }: ScrapeFormProp
                             value={item.url}
                             onChange={(e) => updateUrlItem(item.originalIndex, 'url', e.target.value)}
                             placeholder={`https://example.com/${categoryKey === 'campaigns' ? 'erbjudanden' : categoryKey === 'cars' ? 'personbilar' : 'transportbilar'}`}
-                            className={`w-full px-2 py-1 border rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent ${item.url.trim() === ''
-                                ? 'border-gray-300'
+                            className={`w-full px-2 py-1 border rounded text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent ${item.url.trim() === ''
+                                ? 'border-gray-300 bg-white'
                                 : isValidUrl(item.url)
                                   ? 'border-green-300 bg-green-50'
                                   : 'border-red-300 bg-red-50'

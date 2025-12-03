@@ -119,10 +119,10 @@ export function PayloadCMSDisplay({ aiResults }: PayloadCMSDisplayProps) {
         <div>
           <h3 className="text-xl font-bold text-gray-900 mb-2 flex items-center">
             <span className="mr-2">🚀</span>
-            Payload CMS Import
+            CMS Import
           </h3>
           <p className="text-gray-600">
-            Importera skrapade fordon till Payload CMS med avduplicering och märkeshantering.
+            Importera skrapade fordon till CMS med avduplicering och märkeshantering.
           </p>
         </div>
 
@@ -190,7 +190,7 @@ export function PayloadCMSDisplay({ aiResults }: PayloadCMSDisplayProps) {
               ) : (
                 <>
                   <span>🚀</span>
-                  <span>Importera till Payload CMS</span>
+                  <span>Importera till CMS</span>
                 </>
               )}
             </button>

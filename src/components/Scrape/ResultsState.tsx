@@ -1,10 +1,24 @@
-// components/ResultsState.tsx - Updated with Payload CMS integration
+// components/ResultsState.tsx - Updated with CMS integration
 import { useState, useEffect } from 'react';
 import { LoadingSpinner } from './LoadingSpinner';
 import { AIResultsDisplay } from './AIResultsDisplay';
 import { HTMLContentDisplay } from './HTMLContentDisplay';
+import { CMSPushPanel } from './CMSPushPanel';
 import { ScrapeResult } from '@/lib/scraper';
 // EnhancedProcessedResult type is no longer needed since we use any[] for aiResults
+
+// PDF Processing Log interface
+interface PDFProcessingLog {
+    timestamp: string;
+    pdfUrl: string;
+    success: boolean;
+    method: string;
+    pageCount?: number;
+    characterCount: number;
+    processingTimeMs: number;
+    textPreview?: string;
+    error?: string;
+}
 
 interface UrlData {
     url: string;
@@ -49,6 +63,43 @@ export function ResultsState({
     // Set default active view based on AI results availability
     const [activeView, setActiveView] = useState<ViewType>('html');
 
+    // PDF processing logs state
+    const [pdfLogs, setPdfLogs] = useState<PDFProcessingLog[]>([]);
+    const [pdfLogsExpanded, setPdfLogsExpanded] = useState(false);
+    const [pdfLogsLoading, setPdfLogsLoading] = useState(false);
+
+    // Function to fetch PDF logs
+    const fetchPdfLogs = async () => {
+        setPdfLogsLoading(true);
+        try {
+            const response = await fetch('/api/pdf-logs');
+            if (response.ok) {
+                const data = await response.json();
+                setPdfLogs(data.logs || []);
+            }
+        } catch (error) {
+            console.error('Failed to fetch PDF logs:', error);
+        } finally {
+            setPdfLogsLoading(false);
+        }
+    };
+
+    // Fetch PDF logs when component mounts or entry changes
+    useEffect(() => {
+        fetchPdfLogs();
+    }, [currentEntry.id]);
+
+    // Refetch PDF logs when AI processing completes
+    useEffect(() => {
+        if (!isAiProcessing && currentEntry.aiResults.length > 0) {
+            // Small delay to ensure logs are written
+            const timer = setTimeout(() => {
+                fetchPdfLogs();
+            }, 500);
+            return () => clearTimeout(timer);
+        }
+    }, [isAiProcessing, currentEntry.aiResults.length]);
+
     // Helper function to get successful scrape results
     const getSuccessfulScrapeResults = (): CategorizedResult[] => {
         return currentEntry.scrapeResults.filter(r => r.success);
@@ -66,7 +117,7 @@ export function ResultsState({
         let totalCost = 0;
         let totalProcessingTime = 0;
         let apiCalls = 0;
-        const providerBreakdown = { openai: 0, perplexity: 0 };
+        const providerBreakdown = { claude: 0, perplexity: 0 };
 
         // Debug logging
         console.log('🔍 Token Summary Debug - AI Results:', aiResults);
@@ -88,43 +139,43 @@ export function ResultsState({
                 
                 // If no cost is provided but we have token counts, calculate it
                 if (costFromTokenUsage === 0 && result.token_usage.total_tokens > 0) {
-                    const promptTokens = result.token_usage.prompt_tokens || 0;
-                    const completionTokens = result.token_usage.completion_tokens || 0;
-                    const model = result.token_usage.model_used || 'gpt-4o-mini';
-                    const provider = result.token_usage.api_provider || 'openai';
-                    
+                    const inputTokens = result.token_usage.prompt_tokens || result.token_usage.inputTokens || 0;
+                    const outputTokens = result.token_usage.completion_tokens || result.token_usage.outputTokens || 0;
+                    const model = result.token_usage.model_used || 'claude-sonnet-4-5';
+                    const provider = result.token_usage.api_provider || 'claude';
+
                     // Calculate cost manually using the pricing structure
-                    if (provider === 'openai') {
-                        if (model === 'gpt-4o') {
-                            costFromTokenUsage = (promptTokens * 2.5 / 1000000) + (completionTokens * 10.0 / 1000000);
-                        } else if (model === 'gpt-4o-mini') {
-                            costFromTokenUsage = (promptTokens * 0.15 / 1000000) + (completionTokens * 0.6 / 1000000);
-                        } else if (model === 'gpt-5') {
-                            costFromTokenUsage = (promptTokens * 3.0 / 1000000) + (completionTokens * 15.0 / 1000000);
+                    if (provider === 'claude' || model.includes('claude')) {
+                        if (model.includes('claude-sonnet')) {
+                            costFromTokenUsage = (inputTokens * 3.0 / 1000000) + (outputTokens * 15.0 / 1000000);
+                        } else if (model.includes('claude-haiku')) {
+                            costFromTokenUsage = (inputTokens * 0.8 / 1000000) + (outputTokens * 4.0 / 1000000);
+                        } else if (model.includes('claude-opus')) {
+                            costFromTokenUsage = (inputTokens * 15.0 / 1000000) + (outputTokens * 75.0 / 1000000);
                         }
                     } else if (provider === 'perplexity') {
-                        costFromTokenUsage = (promptTokens * 1.0 / 1000000) + (completionTokens * 3.0 / 1000000);
+                        costFromTokenUsage = (inputTokens * 1.0 / 1000000) + (outputTokens * 3.0 / 1000000);
                     }
-                    
+
                     console.log(`💰 Calculated missing cost for ${model} (${provider}): $${costFromTokenUsage.toFixed(6)}`);
                 }
-                
+
                 totalCost += costFromTokenUsage;
-                
+
                 if (result.token_usage.api_provider) {
                     providerBreakdown[result.token_usage.api_provider as keyof typeof providerBreakdown] += costFromTokenUsage;
                 } else {
-                    // Default to openai if no provider specified
-                    providerBreakdown.openai += costFromTokenUsage;
+                    // Default to claude if no provider specified (Claude is primary)
+                    providerBreakdown.claude += costFromTokenUsage;
                 }
             }
             
             // Handle direct cost field
             if (result.total_estimated_cost_usd && result.total_estimated_cost_usd > 0) {
                 totalCost += result.total_estimated_cost_usd;
-                // If we don't have provider info, assume OpenAI for now
+                // If we don't have provider info, assume Claude (primary provider)
                 if (!result.token_usage?.api_provider) {
-                    providerBreakdown.openai += result.total_estimated_cost_usd;
+                    providerBreakdown.claude += result.total_estimated_cost_usd;
                 }
             }
             
@@ -152,15 +203,15 @@ export function ResultsState({
                             if (provider === 'perplexity') {
                                 callCost = (promptTokens * 1.0 / 1000000) + (completionTokens * 3.0 / 1000000);
                                 console.log(`💰 Calculated missing Perplexity cost: $${callCost.toFixed(6)}`);
-                            } else if (provider === 'openai') {
-                                if (model === 'gpt-4o') {
-                                    callCost = (promptTokens * 2.5 / 1000000) + (completionTokens * 10.0 / 1000000);
-                                } else if (model === 'gpt-4o-mini') {
-                                    callCost = (promptTokens * 0.15 / 1000000) + (completionTokens * 0.6 / 1000000);
-                                } else if (model === 'gpt-5') {
+                            } else if (provider === 'claude' || model.includes('claude')) {
+                                if (model.includes('claude-sonnet')) {
                                     callCost = (promptTokens * 3.0 / 1000000) + (completionTokens * 15.0 / 1000000);
+                                } else if (model.includes('claude-haiku')) {
+                                    callCost = (promptTokens * 0.8 / 1000000) + (completionTokens * 4.0 / 1000000);
+                                } else if (model.includes('claude-opus')) {
+                                    callCost = (promptTokens * 15.0 / 1000000) + (completionTokens * 75.0 / 1000000);
                                 }
-                                console.log(`💰 Calculated missing OpenAI API call cost: $${callCost.toFixed(6)}`);
+                                console.log(`💰 Calculated missing Claude API call cost: $${callCost.toFixed(6)}`);
                             }
                         }
                         
@@ -302,9 +353,9 @@ export function ResultsState({
 
     return (
         <div className="max-w-7xl mx-auto">
-            <div className="flex flex-col gap-6" style={{ height: 'calc(100vh - 200px)' }}>
+            <div className="flex flex-col gap-6">
                 <div>
-                    <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6 h-full overflow-y-auto">
+                    <div className="bg-white rounded-xl shadow-lg border border-gray-200 p-6">
                         <div className="space-y-6">
                             {/* Entry Info */}
                             <div>
@@ -378,23 +429,19 @@ export function ResultsState({
                                                 </div>
                                             </div>
                                             
-                                            {/* Provider Breakdown */}
-                                            {(tokenSummary.providerBreakdown.openai > 0 || tokenSummary.providerBreakdown.perplexity > 0) && (
+                                            {/* Provider Breakdown - only show if multiple providers used */}
+                                            {tokenSummary.providerBreakdown.claude > 0 && tokenSummary.providerBreakdown.perplexity > 0 && (
                                                 <div className="mt-3 pt-3 border-t border-green-200">
                                                     <span className="text-xs text-gray-600 mb-2 block">Cost by Provider:</span>
                                                     <div className="flex flex-wrap gap-2">
-                                                        {tokenSummary.providerBreakdown.openai > 0 && (
-                                                            <span className="inline-flex items-center px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs">
-                                                                <span className="mr-1">🤖</span>
-                                                                OpenAI: {formatCost(tokenSummary.providerBreakdown.openai)}
-                                                            </span>
-                                                        )}
-                                                        {tokenSummary.providerBreakdown.perplexity > 0 && (
-                                                            <span className="inline-flex items-center px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">
-                                                                <span className="mr-1">🔍</span>
-                                                                Perplexity: {formatCost(tokenSummary.providerBreakdown.perplexity)}
-                                                            </span>
-                                                        )}
+                                                        <span className="inline-flex items-center px-2 py-1 bg-orange-100 text-orange-800 rounded text-xs">
+                                                            <span className="mr-1">🧠</span>
+                                                            Claude: {formatCost(tokenSummary.providerBreakdown.claude)}
+                                                        </span>
+                                                        <span className="inline-flex items-center px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">
+                                                            <span className="mr-1">🔍</span>
+                                                            Perplexity: {formatCost(tokenSummary.providerBreakdown.perplexity)}
+                                                        </span>
                                                     </div>
                                                 </div>
                                             )}
@@ -471,7 +518,7 @@ export function ResultsState({
                                                     </span>
                                                     <div className="flex items-center space-x-2">
                                                         <span className={`px-2 py-1 rounded text-xs ${
-                                                            result.fact_check!.overall_accuracy >= 80 
+                                                            result.fact_check!.overall_accuracy >= 80
                                                                 ? 'bg-green-100 text-green-800'
                                                                 : result.fact_check!.overall_accuracy >= 60
                                                                 ? 'bg-yellow-100 text-yellow-800'
@@ -491,13 +538,126 @@ export function ResultsState({
                                     }
                                 </div>
                             )}
+
+                            {/* PDF Processing Logs - Always show */}
+                            <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                                <div className="flex justify-between items-center">
+                                    <button
+                                        onClick={() => setPdfLogsExpanded(!pdfLogsExpanded)}
+                                        className="flex-1 flex justify-between items-center"
+                                    >
+                                        <h4 className="font-medium text-amber-900 flex items-center">
+                                            <span className="mr-2">📄</span>
+                                            PDF OCR Loggar ({pdfLogs.length})
+                                        </h4>
+                                        <div className="flex items-center space-x-2">
+                                            {pdfLogs.length > 0 ? (
+                                                <span className="text-xs text-amber-700">
+                                                    {pdfLogs.filter(l => l.success).length} lyckade, {pdfLogs.filter(l => !l.success).length} misslyckade
+                                                </span>
+                                            ) : (
+                                                <span className="text-xs text-gray-500">Inga PDF:er bearbetade</span>
+                                            )}
+                                            <span className={`transform transition-transform ${pdfLogsExpanded ? 'rotate-180' : ''}`}>
+                                                ▼
+                                            </span>
+                                        </div>
+                                    </button>
+                                    <button
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            fetchPdfLogs();
+                                        }}
+                                        className="ml-2 p-1.5 text-amber-700 hover:bg-amber-100 rounded transition-colors"
+                                        title="Uppdatera loggar"
+                                    >
+                                        <svg className={`w-4 h-4 ${pdfLogsLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                        </svg>
+                                    </button>
+                                </div>
+
+                                {pdfLogsExpanded && (
+                                    <div className="mt-4 space-y-3 max-h-96 overflow-y-auto">
+                                        {pdfLogsLoading ? (
+                                            <div className="text-center py-4 text-amber-700">
+                                                <LoadingSpinner size="sm" />
+                                                <span className="ml-2">Laddar loggar...</span>
+                                            </div>
+                                        ) : pdfLogs.length === 0 ? (
+                                            <div className="text-center py-4 text-gray-500 text-sm">
+                                                <p>Inga PDF:er har bearbetats ännu.</p>
+                                                <p className="text-xs mt-1">PDF-loggar visas här efter att du kört &quot;Analysera med AI&quot; på en sida med PDF-länkar.</p>
+                                            </div>
+                                        ) : (
+                                            pdfLogs.map((log, idx) => (
+                                                <div
+                                                    key={idx}
+                                                    className={`p-3 rounded-lg border ${
+                                                        log.success
+                                                            ? 'bg-green-50 border-green-200'
+                                                            : 'bg-red-50 border-red-200'
+                                                    }`}
+                                                >
+                                                    <div className="flex justify-between items-start mb-2">
+                                                        <div className="flex items-center space-x-2">
+                                                            <span>{log.success ? '✅' : '❌'}</span>
+                                                            <span className="text-xs font-mono text-gray-600">
+                                                                {new Date(log.timestamp).toLocaleString('sv-SE')}
+                                                            </span>
+                                                        </div>
+                                                        <span className="text-xs px-2 py-1 bg-gray-100 rounded">
+                                                            {log.method}
+                                                        </span>
+                                                    </div>
+
+                                                    <p className="text-xs text-gray-700 truncate mb-2" title={log.pdfUrl}>
+                                                        {log.pdfUrl}
+                                                    </p>
+
+                                                    <div className="grid grid-cols-3 gap-2 text-xs">
+                                                        {log.pageCount && (
+                                                            <div className="flex flex-col">
+                                                                <span className="text-gray-500">Sidor</span>
+                                                                <span className="font-medium">{log.pageCount}</span>
+                                                            </div>
+                                                        )}
+                                                        <div className="flex flex-col">
+                                                            <span className="text-gray-500">Tecken</span>
+                                                            <span className="font-medium">{log.characterCount.toLocaleString()}</span>
+                                                        </div>
+                                                        <div className="flex flex-col">
+                                                            <span className="text-gray-500">Tid</span>
+                                                            <span className="font-medium">{log.processingTimeMs}ms</span>
+                                                        </div>
+                                                    </div>
+
+                                                    {log.textPreview && (
+                                                        <div className="mt-2 p-2 bg-white rounded border text-xs text-gray-600 max-h-20 overflow-y-auto">
+                                                            <span className="text-gray-400">Förhandsvisning: </span>
+                                                            {log.textPreview.substring(0, 200)}...
+                                                        </div>
+                                                    )}
+
+                                                    {log.error && (
+                                                        <div className="mt-2 p-2 bg-red-100 rounded text-xs text-red-700">
+                                                            <span className="font-medium">Fel: </span>
+                                                            {log.error}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
 
                 {/* Right Content - Results */}
                 <div className="lg:col-span-2">
-                    <div className="bg-white rounded-xl shadow-lg border border-gray-200 h-full flex flex-col overflow-hidden">
+                    <div className="bg-white rounded-xl shadow-lg border border-gray-200 min-h-[600px] flex flex-col overflow-hidden">
                         {/* Header */}
                         <div className="border-b border-gray-200 px-6 py-4 flex-shrink-0 bg-gradient-to-r from-gray-50 to-white">
                             <div className="flex justify-between items-center">
@@ -542,7 +702,7 @@ export function ResultsState({
                                             disabled={!hasPayloadCMSData()}
                                         >
                                             <span>🚀</span>
-                                            <span>Payload CMS</span>
+                                            <span>Skicka till CMS</span>
                                             {!hasPayloadCMSData() && (
                                                 <span className="text-xs text-gray-400">(ej tillgänglig)</span>
                                             )}
@@ -595,17 +755,7 @@ export function ResultsState({
                             ) : activeView === 'ai' ? (
                                 <AIResultsDisplay results={currentEntry.aiResults} isProcessing={isAiProcessing} />
                             ) : (
-                                <div className="h-full overflow-y-auto p-6">
-                                    <div className="bg-green-50 border border-green-200 p-4 rounded-lg">
-                                        <h3 className="text-lg font-semibold text-green-800 mb-2">
-                                            ✅ Data Automatically Saved
-                                        </h3>
-                                        <p className="text-green-700">
-                                            All scraped data and AI analysis has been automatically saved to the database. 
-                                            You can view it in your <a href="/history" className="underline font-medium">scrape history</a>.
-                                        </p>
-                                    </div>
-                                </div>
+                                <CMSPushPanel aiResults={currentEntry.aiResults} />
                             )}
                         </div>
                     </div>

@@ -46,37 +46,51 @@ export function AIResultsDisplay({ results, isProcessing }: AIResultsDisplayProp
     let totalTokens = 0;
     let totalCost = 0;
     let totalProcessingTime = 0;
-    let openaiCost = 0;
+    let claudeCost = 0;
     let perplexityCost = 0;
+    let googleOcrCost = 0;
+    let googleOcrPages = 0;
     let totalApiCalls = 0;
 
     results.forEach(result => {
+      // Get tokens from token_usage
       if (result.token_usage) {
         totalTokens += result.token_usage.total_tokens || 0;
-        const cost = result.token_usage.estimated_cost_usd || 0;
+      }
+
+      // Track Google OCR costs separately (page-based, not token-based)
+      if (result.google_ocr_costs) {
+        googleOcrCost += result.google_ocr_costs.total_cost_usd || 0;
+        googleOcrPages += result.google_ocr_costs.total_pages || 0;
+      }
+
+      // Use total_estimated_cost_usd as the primary cost source (from database)
+      // This already includes Google OCR costs added during processing
+      if (result.total_estimated_cost_usd && result.total_estimated_cost_usd > 0) {
+        totalCost += result.total_estimated_cost_usd;
+        // Subtract OCR cost to get Claude-only cost
+        const ocrCostInResult = result.google_ocr_costs?.total_cost_usd || 0;
+        claudeCost += result.total_estimated_cost_usd - ocrCostInResult;
+      } else if (result.token_usage?.estimated_cost_usd) {
+        // Fallback to token_usage cost if total not available
+        const cost = result.token_usage.estimated_cost_usd;
         totalCost += cost;
-        
-        if (result.token_usage.api_provider === 'openai') {
-          openaiCost += cost;
-        } else if (result.token_usage.api_provider === 'perplexity') {
+
+        if (result.token_usage.api_provider === 'perplexity') {
           perplexityCost += cost;
+        } else {
+          claudeCost += cost;
         }
       }
-      
-      if (result.total_estimated_cost_usd) {
-        totalCost += result.total_estimated_cost_usd;
+
+      // Add processing time
+      if (result.processing_time_ms) {
+        totalProcessingTime += result.processing_time_ms;
       }
-      
+
+      // Count API calls (but don't double-count their costs)
       if (result.api_calls) {
         totalApiCalls += result.api_calls.length;
-        result.api_calls.forEach((call: any) => {
-          totalProcessingTime += call.processing_time_ms || 0;
-          if (call.token_usage?.api_provider === 'openai') {
-            openaiCost += call.token_usage.estimated_cost_usd || 0;
-          } else if (call.token_usage?.api_provider === 'perplexity') {
-            perplexityCost += call.token_usage.estimated_cost_usd || 0;
-          }
-        });
       }
     });
 
@@ -84,8 +98,10 @@ export function AIResultsDisplay({ results, isProcessing }: AIResultsDisplayProp
       totalTokens,
       totalCost,
       totalProcessingTime,
-      openaiCost,
+      claudeCost,
       perplexityCost,
+      googleOcrCost,
+      googleOcrPages,
       totalApiCalls
     };
   };
@@ -245,19 +261,25 @@ export function AIResultsDisplay({ results, isProcessing }: AIResultsDisplayProp
                 </button>
               </div>
               
-              {/* Provider Cost Breakdown */}
-              {(tokenSummary.openaiCost > 0 || tokenSummary.perplexityCost > 0) && (
+              {/* Provider Cost Breakdown - show when any provider has costs */}
+              {(tokenSummary.claudeCost > 0 || tokenSummary.perplexityCost > 0 || tokenSummary.googleOcrCost > 0) && (
                 <div className="flex flex-wrap items-center gap-2 mt-2">
-                  {tokenSummary.openaiCost > 0 && (
-                    <span className="inline-flex items-center px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs">
-                      <span className="mr-1">🤖</span>
-                      OpenAI: {formatCost(tokenSummary.openaiCost)}
+                  {tokenSummary.claudeCost > 0 && (
+                    <span className="inline-flex items-center px-2 py-1 bg-orange-100 text-orange-800 rounded text-xs">
+                      <span className="mr-1">🧠</span>
+                      Claude: {formatCost(tokenSummary.claudeCost)}
                     </span>
                   )}
                   {tokenSummary.perplexityCost > 0 && (
                     <span className="inline-flex items-center px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">
                       <span className="mr-1">🔍</span>
                       Perplexity: {formatCost(tokenSummary.perplexityCost)}
+                    </span>
+                  )}
+                  {tokenSummary.googleOcrCost > 0 && (
+                    <span className="inline-flex items-center px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs">
+                      <span className="mr-1">📄</span>
+                      Google OCR: {formatCost(tokenSummary.googleOcrCost)} ({tokenSummary.googleOcrPages} pages)
                     </span>
                   )}
                 </div>

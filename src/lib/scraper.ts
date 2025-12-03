@@ -1,6 +1,64 @@
 "use server";
 import puppeteer from 'puppeteer';
 
+// Helper function to categorize PDF type
+function categorizePDFType(url: string): 'pricelist' | 'brochure' | 'specifications' | 'unknown' {
+  const urlLower = url.toLowerCase();
+  if (urlLower.includes('prislista') || urlLower.includes('pricelist') || urlLower.includes('price')) {
+    return 'pricelist';
+  }
+  if (urlLower.includes('broschyr') || urlLower.includes('brochure') || urlLower.includes('_8s_') || urlLower.includes('_12s_')) {
+    return 'brochure';
+  }
+  if (urlLower.includes('spec') || urlLower.includes('technical')) {
+    return 'specifications';
+  }
+  return 'unknown';
+}
+
+// Extract PDF links from HTML content
+function extractPDFsFromHTML(html: string, pageUrl: string): PDFLink[] {
+  const pdfLinks: PDFLink[] = [];
+  const seenUrls = new Set<string>();
+
+  // Pattern to find PDF links
+  const patterns = [
+    /href=["']([^"']*\.pdf[^"']*)["']/gi,
+    /https?:\/\/[^\s"'<>]+\.pdf/gi
+  ];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null) {
+      let pdfUrl = match[1] || match[0];
+      pdfUrl = pdfUrl.split('?')[0]; // Remove query params
+
+      // Convert relative to absolute
+      if (pdfUrl.startsWith('/')) {
+        try {
+          const url = new URL(pageUrl);
+          pdfUrl = `${url.protocol}//${url.host}${pdfUrl}`;
+        } catch {
+          continue;
+        }
+      } else if (!pdfUrl.startsWith('http')) {
+        continue;
+      }
+
+      if (!seenUrls.has(pdfUrl)) {
+        seenUrls.add(pdfUrl);
+        pdfLinks.push({
+          url: pdfUrl,
+          type: categorizePDFType(pdfUrl),
+          foundOnPage: pageUrl
+        });
+      }
+    }
+  }
+
+  return pdfLinks;
+}
+
 export interface ScrapedData {
   title: string;
   price?: string;
@@ -33,6 +91,12 @@ export interface PageInfo {
   linksFetched: number;
 }
 
+export interface PDFLink {
+  url: string;
+  type: 'pricelist' | 'brochure' | 'specifications' | 'unknown';
+  foundOnPage: string; // URL of the page where this PDF was found
+}
+
 export interface ScrapeResult {
   success: boolean;
   url: string;
@@ -40,6 +104,7 @@ export interface ScrapeResult {
   cleanedHtml: string;
   structuredData: ScrapedData[];
   linkedContent: LinkedContent[];
+  pdfLinks: PDFLink[]; // PDF links found during scraping
   thumbnail?: string;
   formattedOutput?: string;
   error?: string;
@@ -937,18 +1002,54 @@ export async function scrapeWebsite(url: string, fetchLinks = true): Promise<Scr
 
     console.log(`Combined HTML built with ${linkedContent.filter(lc => lc.success).length} linked pages`);
 
-    const result: ScrapeResult = { 
-      success: true, 
-      url, 
-      pageInfo: info, 
+    // Extract PDFs from main page and all linked pages
+    const allPdfLinks: PDFLink[] = [];
+    const seenPdfUrls = new Set<string>();
+
+    // Extract from main page
+    const mainPagePdfs = extractPDFsFromHTML(cleanedHtml, url);
+    mainPagePdfs.forEach(pdf => {
+      if (!seenPdfUrls.has(pdf.url)) {
+        seenPdfUrls.add(pdf.url);
+        allPdfLinks.push(pdf);
+      }
+    });
+
+    // Extract from linked pages
+    linkedContent.forEach(link => {
+      if (link.success && link.cleanedHtml) {
+        const linkedPdfs = extractPDFsFromHTML(link.cleanedHtml, link.url);
+        linkedPdfs.forEach(pdf => {
+          if (!seenPdfUrls.has(pdf.url)) {
+            seenPdfUrls.add(pdf.url);
+            allPdfLinks.push(pdf);
+          }
+        });
+      }
+    });
+
+    // Log PDF findings
+    const pricelistPdfs = allPdfLinks.filter(p => p.type === 'pricelist');
+    const brochurePdfs = allPdfLinks.filter(p => p.type === 'brochure');
+    console.log(`📄 Found ${allPdfLinks.length} PDFs total: ${pricelistPdfs.length} pricelists, ${brochurePdfs.length} brochures`);
+    if (pricelistPdfs.length > 0) {
+      console.log('📄 Pricelist PDFs:');
+      pricelistPdfs.forEach(pdf => console.log(`   - ${pdf.url}`));
+    }
+
+    const result: ScrapeResult = {
+      success: true,
+      url,
+      pageInfo: info,
       cleanedHtml: combinedHtml, // Use the properly formatted combined HTML
-      structuredData, 
-      linkedContent, 
-      thumbnail: bestThumbnail 
+      structuredData,
+      linkedContent,
+      pdfLinks: allPdfLinks,
+      thumbnail: bestThumbnail
     };
 
     console.log('✅ Scraping completed successfully');
-    console.log(`Final stats: Original: ${originalHtml.length}, Cleaned: ${cleanedHtml.length}, Links: ${foundLinks.length}, Structured items: ${structuredData.length}`);
+    console.log(`Final stats: Original: ${originalHtml.length}, Cleaned: ${cleanedHtml.length}, Links: ${foundLinks.length}, Structured items: ${structuredData.length}, PDFs: ${allPdfLinks.length}`);
 
     return result;
 
@@ -966,19 +1067,20 @@ export async function scrapeWebsite(url: string, fetchLinks = true): Promise<Scr
     const errorResult: ScrapeResult = {
       success: false,
       url,
-      pageInfo: { 
-        title: '', 
-        description: '', 
-        url, 
-        scrapedAt: new Date().toISOString(), 
-        contentLength: 0, 
-        cleanedContentLength: 0, 
-        linksFound: 0, 
-        linksFetched: 0 
+      pageInfo: {
+        title: '',
+        description: '',
+        url,
+        scrapedAt: new Date().toISOString(),
+        contentLength: 0,
+        cleanedContentLength: 0,
+        linksFound: 0,
+        linksFetched: 0
       },
       cleanedHtml: '',
       structuredData: [],
       linkedContent: [],
+      pdfLinks: [],
       error: error?.message || 'Failed to scrape website'
     };
     

@@ -160,23 +160,39 @@ export class ScrapeService {
       totalCost = result.token_usage.estimated_cost_usd;
     } else if (result.token_usage) {
       // Fallback: calculate cost if not provided
-      const promptTokens = result.token_usage.prompt_tokens || 0;
-      const completionTokens = result.token_usage.completion_tokens || 0;
-      const model = result.token_usage.model_used || 'gpt-4o-mini';
-      
+      const inputTokens = result.token_usage.prompt_tokens || result.token_usage.inputTokens || 0;
+      const outputTokens = result.token_usage.completion_tokens || result.token_usage.outputTokens || 0;
+      const model = result.token_usage.model_used || 'claude-sonnet-4-5';
+
       // Calculate cost based on model
-      if (model.includes('gpt-4o-mini')) {
-        totalCost = (promptTokens * 0.15 / 1000000) + (completionTokens * 0.6 / 1000000);
+      if (model.includes('claude-sonnet-4') || model.includes('claude-sonnet')) {
+        // Claude Sonnet 4.5 pricing
+        totalCost = (inputTokens * 3.0 / 1000000) + (outputTokens * 15.0 / 1000000);
+      } else if (model.includes('claude-haiku')) {
+        // Claude Haiku 3.5 pricing
+        totalCost = (inputTokens * 0.8 / 1000000) + (outputTokens * 4.0 / 1000000);
+      } else if (model.includes('claude-opus')) {
+        // Claude Opus 4 pricing
+        totalCost = (inputTokens * 15.0 / 1000000) + (outputTokens * 75.0 / 1000000);
+      } else if (model.includes('gpt-4o-mini')) {
+        totalCost = (inputTokens * 0.15 / 1000000) + (outputTokens * 0.6 / 1000000);
       } else if (model.includes('gpt-4o')) {
-        totalCost = (promptTokens * 2.5 / 1000000) + (completionTokens * 10.0 / 1000000);
-      } else if (model.includes('gpt-5')) {
-        totalCost = (promptTokens * 3.0 / 1000000) + (completionTokens * 15.0 / 1000000);
+        totalCost = (inputTokens * 2.5 / 1000000) + (outputTokens * 10.0 / 1000000);
       } else if (model.includes('gpt-4')) {
-        // GPT-4 classic pricing (higher than gpt-4o)
-        totalCost = (promptTokens * 30.0 / 1000000) + (completionTokens * 60.0 / 1000000);
+        totalCost = (inputTokens * 30.0 / 1000000) + (outputTokens * 60.0 / 1000000);
+      } else if (model.includes('sonar')) {
+        // Perplexity Sonar pricing (approximate)
+        totalCost = (inputTokens * 1.0 / 1000000) + (outputTokens * 1.0 / 1000000);
       }
-      
-      console.log(`💰 Calculated missing cost for ${model}: $${totalCost.toFixed(6)} (${promptTokens}+${completionTokens} tokens)`);
+
+      console.log(`💰 Calculated missing cost for ${model}: $${totalCost.toFixed(6)} (${inputTokens}+${outputTokens} tokens)`);
+    }
+
+    // Add Google OCR costs to total if present
+    const googleOcrCosts = (result as any).google_ocr_costs;
+    if (googleOcrCosts?.total_cost_usd) {
+      totalCost += googleOcrCosts.total_cost_usd;
+      console.log(`💰 Added Google OCR cost: $${googleOcrCosts.total_cost_usd.toFixed(6)} (${googleOcrCosts.total_pages} pages)`);
     }
 
     const { data, error } = await client
@@ -188,7 +204,7 @@ export class ScrapeService {
         success: result.success,
         token_usage: result.token_usage || null,
         processing_time_ms: processingTimeMs,
-        model_used: result.token_usage?.model_used || 'gpt-4',
+        model_used: result.token_usage?.model_used || 'claude-sonnet-4-5',
         fact_check_score: factCheckData?.score,
         fact_check_confidence: factCheckData?.confidence,
         fact_check_issues: factCheckData?.issues || null,
@@ -197,7 +213,9 @@ export class ScrapeService {
         debug_info: (result as any).debug_info || null,
         error_message: result.error,
         total_estimated_cost_usd: totalCost > 0 ? totalCost : null,
-        api_calls: apiCallDetails.length > 0 ? apiCallDetails : null
+        api_calls: apiCallDetails.length > 0 ? apiCallDetails : null,
+        google_ocr_costs: googleOcrCosts || null,
+        raw_pdf_text: (result as any).raw_pdf_text || null
       })
       .select('id')
       .single()
@@ -360,8 +378,11 @@ export class ScrapeService {
           price: model.price,
           old_price: model.old_price,
           privatleasing: model.privatleasing,
+          old_privatleasing: model.old_privatleasing,
           company_leasing_price: model.company_leasing_price,
+          old_company_leasing_price: model.old_company_leasing_price,
           loan_price: model.loan_price,
+          old_loan_price: model.old_loan_price,
           thumbnail_url: model.thumbnail
         }))
 
@@ -408,7 +429,9 @@ export class ScrapeService {
           description: vehicle.description,
           thumbnail_url: vehicle.thumbnail,
           vehicle_type: vehicleType,
+          body_type: vehicle.body_type,
           free_text: vehicle.free_text,
+          source_url: vehicle.source_url,
           pdf_source_url: vehicle.pdf_source_url
         })
         .select('id')
@@ -427,9 +450,17 @@ export class ScrapeService {
           price: model.price,
           old_price: model.old_price,
           privatleasing: model.privatleasing,
+          old_privatleasing: model.old_privatleasing,
           company_leasing_price: model.company_leasing_price,
+          old_company_leasing_price: model.old_company_leasing_price,
           loan_price: model.loan_price,
-          thumbnail_url: model.thumbnail
+          old_loan_price: model.old_loan_price,
+          thumbnail_url: model.thumbnail,
+          // Vehicle specifications
+          bransle: model.bransle || model.fuel_type || null,
+          biltyp: model.biltyp || model.car_type || null,
+          vaxellada: model.vaxellada || model.transmission || null,
+          utrustning: model.utrustning || null
         }))
 
         const { error: modelsError } = await client
@@ -480,10 +511,10 @@ export class ScrapeService {
     }
   }
 
-  // Get user's scrape sessions
-  async getUserScrapeSessions(userId: string, limit = 50): Promise<ScrapeSession[]> {
+  // Get user's scrape sessions with log counts
+  async getUserScrapeSessions(userId: string, limit = 50): Promise<(ScrapeSession & { log_counts?: { info: number; warn: number; error: number; debug: number } })[]> {
     const client = await this.getClient()
-    const { data, error } = await client
+    const { data: sessions, error } = await client
       .from('scrape_sessions')
       .select('*')
       .eq('user_id', userId)
@@ -491,7 +522,36 @@ export class ScrapeService {
       .limit(limit)
 
     if (error) throw new Error(`Failed to get scrape sessions: ${error.message}`)
-    return data
+
+    // Fetch log counts for each session
+    const sessionIds = sessions.map((s: ScrapeSession) => s.id)
+
+    if (sessionIds.length > 0) {
+      const { data: logs } = await client
+        .from('scrape_logs')
+        .select('session_id, level')
+        .in('session_id', sessionIds)
+
+      // Group logs by session and level
+      const logCounts: Record<string, { info: number; warn: number; error: number; debug: number }> = {}
+
+      if (logs) {
+        for (const log of logs) {
+          if (!logCounts[log.session_id]) {
+            logCounts[log.session_id] = { info: 0, warn: 0, error: 0, debug: 0 }
+          }
+          logCounts[log.session_id][log.level as keyof typeof logCounts[string]]++
+        }
+      }
+
+      // Attach log counts to sessions
+      return sessions.map((session: ScrapeSession) => ({
+        ...session,
+        log_counts: logCounts[session.id] || { info: 0, warn: 0, error: 0, debug: 0 }
+      }))
+    }
+
+    return sessions
   }
 
   // Get session details with all related data
@@ -749,5 +809,99 @@ export class ScrapeService {
     if (insertError) {
       throw new Error(`Failed to initialize default links: ${insertError.message}`)
     }
+  }
+
+  // ============================================
+  // SCRAPE LOGS METHODS
+  // ============================================
+
+  /**
+   * Add a log entry for a scrape session
+   */
+  async addLog(
+    sessionId: string,
+    level: 'info' | 'warn' | 'error' | 'debug',
+    message: string,
+    step?: string,
+    details?: Record<string, any>
+  ): Promise<void> {
+    try {
+      const client = await this.getClient()
+      const { error } = await client
+        .from('scrape_logs')
+        .insert({
+          session_id: sessionId,
+          level,
+          step,
+          message,
+          details: details || null
+        })
+
+      if (error) {
+        console.error('Failed to save log:', error.message)
+      }
+    } catch (err) {
+      // Don't throw - logging should never break the main flow
+      console.error('Error saving log:', err)
+    }
+  }
+
+  /**
+   * Convenience methods for different log levels
+   */
+  async logInfo(sessionId: string, message: string, step?: string, details?: Record<string, any>) {
+    await this.addLog(sessionId, 'info', message, step, details)
+  }
+
+  async logWarn(sessionId: string, message: string, step?: string, details?: Record<string, any>) {
+    await this.addLog(sessionId, 'warn', message, step, details)
+  }
+
+  async logError(sessionId: string, message: string, step?: string, details?: Record<string, any>) {
+    await this.addLog(sessionId, 'error', message, step, details)
+  }
+
+  async logDebug(sessionId: string, message: string, step?: string, details?: Record<string, any>) {
+    await this.addLog(sessionId, 'debug', message, step, details)
+  }
+
+  /**
+   * Get logs for a specific session
+   */
+  async getSessionLogs(sessionId: string): Promise<any[]> {
+    const client = await this.getClient()
+    const { data, error } = await client
+      .from('scrape_logs')
+      .select('*')
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: true })
+
+    if (error) {
+      console.error('Failed to get session logs:', error.message)
+      return []
+    }
+    return data || []
+  }
+
+  /**
+   * Get recent logs across all sessions for a user
+   */
+  async getRecentLogs(userId: string, limit = 100): Promise<any[]> {
+    const client = await this.getClient()
+    const { data, error } = await client
+      .from('scrape_logs')
+      .select(`
+        *,
+        scrape_sessions!inner(user_id, url, page_title)
+      `)
+      .eq('scrape_sessions.user_id', userId)
+      .order('created_at', { ascending: false })
+      .limit(limit)
+
+    if (error) {
+      console.error('Failed to get recent logs:', error.message)
+      return []
+    }
+    return data || []
   }
 }

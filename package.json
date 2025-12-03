@@ -9,12 +9,12 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@google-cloud/documentai": "^9.4.0",
+    "@anthropic-ai/sdk": "^0.39.0",
     "@supabase/ssr": "^0.7.0",
     "@supabase/supabase-js": "^2.57.2",
     "axios": "^1.11.0",
     "next": "15.5.2",
-    "openai": "^5.12.2",
+    "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^3.11.174",
     "puppeteer": "^24.19.0",
     "react": "19.1.0",

@@ -143,7 +143,7 @@ CREATE TABLE vehicles (
 CREATE TABLE vehicle_models (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   vehicle_id UUID REFERENCES vehicles(id) ON DELETE CASCADE,
-  
+
   name TEXT NOT NULL,
   price DECIMAL(12,2),
   old_price DECIMAL(12,2),
@@ -151,15 +151,25 @@ CREATE TABLE vehicle_models (
   company_leasing_price DECIMAL(12,2),
   loan_price DECIMAL(12,2),
   thumbnail_url TEXT,
-  
+
+  -- Vehicle specifications
+  bransle TEXT,  -- Fuel type: El, Bensin, Diesel, Hybrid, Laddhybrid
+  biltyp TEXT,   -- Vehicle type: suv, sedan, kombi, halvkombi, cab, coupe, minibuss, pickup, transportbil
+  vaxellada TEXT, -- Transmission: Automat, Manuell
+
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Add columns to existing table if they don't exist (for migrations)
+-- ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS bransle TEXT;
+-- ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS biltyp TEXT;
+-- ALTER TABLE vehicle_models ADD COLUMN IF NOT EXISTS vaxellada TEXT;
 
 -- Linked content table - stores content from followed links
 CREATE TABLE linked_content (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   session_id UUID REFERENCES scrape_sessions(id) ON DELETE CASCADE,
-  
+
   url TEXT NOT NULL,
   title TEXT,
   content TEXT,
@@ -167,7 +177,20 @@ CREATE TABLE linked_content (
   link_text TEXT,
   success BOOLEAN DEFAULT false,
   error_message TEXT,
-  
+
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Scrape logs table - stores server-side processing logs for debugging
+CREATE TABLE scrape_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  session_id UUID REFERENCES scrape_sessions(id) ON DELETE CASCADE,
+
+  level TEXT CHECK (level IN ('info', 'warn', 'error', 'debug')) NOT NULL DEFAULT 'info',
+  step TEXT,  -- e.g., 'scraping', 'pdf_extraction', 'ai_processing', 'saving'
+  message TEXT NOT NULL,
+  details JSONB,  -- Additional structured data (e.g., PDF URLs, token usage, errors)
+
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -182,6 +205,8 @@ CREATE INDEX idx_ai_processed_results_session_id ON ai_processed_results(session
 CREATE INDEX idx_campaigns_session_id ON campaigns(session_id);
 CREATE INDEX idx_vehicles_session_id ON vehicles(session_id);
 CREATE INDEX idx_vehicles_vehicle_type ON vehicles(vehicle_type);
+CREATE INDEX idx_scrape_logs_session_id ON scrape_logs(session_id);
+CREATE INDEX idx_scrape_logs_level ON scrape_logs(level);
 
 -- Create updated_at trigger function
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -207,6 +232,7 @@ ALTER TABLE campaign_included_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vehicles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE vehicle_models ENABLE ROW LEVEL SECURITY;
 ALTER TABLE linked_content ENABLE ROW LEVEL SECURITY;
+ALTER TABLE scrape_logs ENABLE ROW LEVEL SECURITY;
 
 -- Policies for authenticated users to access their own data
 CREATE POLICY "Users can view their own scrape sessions" ON scrape_sessions
@@ -234,4 +260,7 @@ CREATE POLICY "Users can view their own vehicle models" ON vehicle_models
   FOR ALL USING (auth.uid() = (SELECT s.user_id FROM scrape_sessions s JOIN vehicles v ON v.session_id = s.id WHERE v.id = vehicle_id));
 
 CREATE POLICY "Users can view their own linked content" ON linked_content
+  FOR ALL USING (auth.uid() = (SELECT user_id FROM scrape_sessions WHERE id = session_id));
+
+CREATE POLICY "Users can view their own scrape logs" ON scrape_logs
   FOR ALL USING (auth.uid() = (SELECT user_id FROM scrape_sessions WHERE id = session_id));

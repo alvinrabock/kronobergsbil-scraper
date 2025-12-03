@@ -7,8 +7,11 @@ export interface CampaignVehicleModel {
   price: number;
   old_price?: number;
   privatleasing: number;
+  old_privatleasing?: number;  // Previous leasing price (for campaigns/discounts)
   company_leasing_price: number;
+  old_company_leasing_price?: number;  // Previous company leasing price
   loan_price?: number;
+  old_loan_price?: number;  // Previous loan price
   thumbnail?: string;
 }
 
@@ -58,10 +61,20 @@ export interface VehicleModel {
   engine_type?: string; // Bensin/Hybrid/El
   transmission?: string; // e.g., 8-växlad automat
   privatleasing: number;
+  old_privatleasing?: number;  // Previous leasing price (for campaigns/discounts)
   company_leasing_price: number;
+  old_company_leasing_price?: number;  // Previous company leasing price
   loan_price?: number;
+  old_loan_price?: number;  // Previous loan price
   thumbnail?: string;
   financing_options?: FinancingOptions; // Keep for backward compatibility
+  // Vehicle specifications (Swedish field names)
+  bransle?: string;      // Fuel type: El, Bensin, Diesel, Hybrid, Laddhybrid
+  biltyp?: string;       // Vehicle type: suv, sedan, kombi, halvkombi, cab, coupe, minibuss, pickup, transportbil
+  vaxellada?: string;    // Transmission: Automat, Manuell
+  fuel_type?: string;    // Alias for bransle
+  car_type?: string;     // Alias for biltyp
+  utrustning?: string[]; // Equipment list for this trim level
 }
 
 // Technical specifications interfaces
@@ -177,6 +190,7 @@ export interface VehicleData {
   wheel_options?: WheelOption[];
   warranty?: Warranty;
   free_text: string; // conditions and legal text
+  source_url?: string; // URL of the page where this vehicle was scraped from
   pdf_source_url?: string; // URL of the PDF where data was extracted from
 }
 
@@ -187,11 +201,11 @@ export interface TokenUsage {
   total_tokens: number;
   estimated_cost_usd: number;
   model_used: string;
-  api_provider: 'openai' | 'perplexity';
+  api_provider: 'claude' | 'perplexity';
 }
 
 export interface ApiCallDetails {
-  api_provider: 'openai' | 'perplexity';
+  api_provider: 'claude' | 'perplexity';
   model_used: string;
   call_type: 'main_processing' | 'image_analysis' | 'fact_checking' | 'batch_processing';
   token_usage: TokenUsage;
@@ -213,6 +227,12 @@ export interface ProcessedResult {
   token_usage?: TokenUsage;
   api_calls?: ApiCallDetails[];
   total_estimated_cost_usd?: number;
+  // Google Document AI OCR costs (separate from token-based AI costs)
+  google_ocr_costs?: {
+    total_pages: number;
+    total_cost_usd: number;
+    pdfs_processed: number;
+  };
   pdf_processing?: {
     enabled: boolean;
     results: Array<{
@@ -314,8 +334,11 @@ export function validateCampaignData(campaign: any): CampaignData | null {
       price: parseFloat(model.price) || 0,
       old_price: parseFloat(model.old_price) || 0,
       privatleasing: parseFloat(model.privatleasing) || parseFloat(model.leasing_price) || 0, // fallback to old name
+      old_privatleasing: parseFloat(model.old_privatleasing) || 0,
       company_leasing_price: parseFloat(model.company_leasing_price) || 0,
+      old_company_leasing_price: parseFloat(model.old_company_leasing_price) || 0,
       loan_price: parseFloat(model.loan_price) || 0,
+      old_loan_price: parseFloat(model.old_loan_price) || 0,
       thumbnail: model.thumbnail || ''
     }));
 
@@ -358,9 +381,16 @@ export function validateVehicleData(vehicle: any): VehicleData | null {
       price: parseFloat(model.price) || 0,
       old_price: parseFloat(model.old_price) || 0,
       privatleasing: parseFloat(model.privatleasing) || parseFloat(model.leasing_price) || 0, // fallback to old name
+      old_privatleasing: parseFloat(model.old_privatleasing) || 0,
       company_leasing_price: parseFloat(model.company_leasing_price) || 0,
+      old_company_leasing_price: parseFloat(model.old_company_leasing_price) || 0,
       loan_price: parseFloat(model.loan_price) || 0,
-      thumbnail: model.thumbnail || ''
+      old_loan_price: parseFloat(model.old_loan_price) || 0,
+      thumbnail: model.thumbnail || '',
+      bransle: model.bransle || null,
+      biltyp: model.biltyp || null,
+      vaxellada: model.vaxellada || null,
+      utrustning: Array.isArray(model.utrustning) ? model.utrustning : []
     }));
 
     return {
@@ -370,6 +400,7 @@ export function validateVehicleData(vehicle: any): VehicleData | null {
       thumbnail: vehicle.thumbnail || '',
       vehicle_model: validatedModels,
       free_text: vehicle.free_text || '',
+      source_url: vehicle.source_url || null,
       pdf_source_url: vehicle.pdf_source_url || null
     };
   } catch (error) {
@@ -408,18 +439,18 @@ export function formatDate(dateString: string): string {
 
 // API Pricing (as of 2024 - these should be updated regularly)
 export const API_PRICING = {
-  openai: {
-    'gpt-4o': {
-      prompt_tokens: 2.5 / 1000000, // $2.50 per 1M tokens
-      completion_tokens: 10.0 / 1000000, // $10.00 per 1M tokens
+  claude: {
+    'claude-sonnet-4-5': {
+      prompt_tokens: 3.0 / 1000000, // $3.00 per 1M tokens
+      completion_tokens: 15.0 / 1000000, // $15.00 per 1M tokens
     },
-    'gpt-4o-mini': {
-      prompt_tokens: 0.15 / 1000000, // $0.15 per 1M tokens
-      completion_tokens: 0.6 / 1000000, // $0.60 per 1M tokens
+    'claude-haiku-3-5': {
+      prompt_tokens: 0.8 / 1000000, // $0.80 per 1M tokens
+      completion_tokens: 4.0 / 1000000, // $4.00 per 1M tokens
     },
-    'gpt-5': {
-      prompt_tokens: 3.0 / 1000000, // Estimated pricing
-      completion_tokens: 15.0 / 1000000,
+    'claude-opus-4': {
+      prompt_tokens: 15.0 / 1000000, // $15.00 per 1M tokens
+      completion_tokens: 75.0 / 1000000, // $75.00 per 1M tokens
     },
   },
   perplexity: {
@@ -435,7 +466,7 @@ export function calculateTokenCost(
   promptTokens: number,
   completionTokens: number,
   model: string,
-  provider: 'openai' | 'perplexity'
+  provider: 'claude' | 'perplexity'
 ): number {
   const providerPricing = API_PRICING[provider];
   if (!providerPricing) {
@@ -445,12 +476,12 @@ export function calculateTokenCost(
 
   // Type-safe pricing lookup
   const pricing = (providerPricing as any)[model];
-  
+
   if (!pricing) {
     console.warn(`Unknown pricing for ${provider}:${model}`);
     return 0;
   }
-  
+
   return (promptTokens * pricing.prompt_tokens) + (completionTokens * pricing.completion_tokens);
 }
 
@@ -458,7 +489,7 @@ export function createTokenUsage(
   promptTokens: number,
   completionTokens: number,
   model: string,
-  provider: 'openai' | 'perplexity'
+  provider: 'claude' | 'perplexity'
 ): TokenUsage {
   return {
     prompt_tokens: promptTokens,

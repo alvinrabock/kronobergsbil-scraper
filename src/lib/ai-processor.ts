@@ -1,6 +1,5 @@
 'use server';
 
-import OpenAI from 'openai';
 import axios from 'axios';
 import {
     ProcessedResult,
@@ -16,10 +15,77 @@ import {
 
     createTokenUsage
 } from './ai-processor-types';
+import {
+    isClaudeEnabled,
+    extractVehicleDataFromHTML,
+    extractVehicleDataFromPDF,
+    selectBestImageWithClaude,
+} from './claude-client';
+import {
+    extractPDFLinksFromHTML,
+    extractPDFText,
+    categorizePDF,
+    filterPricelistPDFs,
+} from './pdf-extractor';
 
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-});
+// AI Provider configuration - Claude is now the primary provider
+const USE_CLAUDE = isClaudeEnabled();
+console.log(`🤖 AI Provider: ${USE_CLAUDE ? 'Anthropic Claude (Sonnet 4.5)' : 'No AI configured - please set CLAUDE_API_KEY'}`);
+
+// Cost tracking for Claude
+function createClaudeTokenUsage(
+    promptTokens: number,
+    completionTokens: number,
+    model: string,
+    cacheReadTokens: number = 0,
+    cacheCreationTokens: number = 0
+): {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    estimated_cost_usd: number;
+    model_used: string;
+    api_provider: 'claude';
+} {
+    // Model-specific pricing (per 1M tokens)
+    let inputCostPer1M: number;
+    let outputCostPer1M: number;
+    let cacheReadCostPer1M: number;
+    let cacheCreationCostPer1M: number;
+
+    if (model.includes('haiku')) {
+        // Claude Haiku 3.5 pricing
+        // Input: $0.80, Output: $4.00
+        // Cache read: $0.08 (90% discount), Cache creation: $1.00 (25% premium)
+        inputCostPer1M = 0.80;
+        outputCostPer1M = 4.0;
+        cacheReadCostPer1M = 0.08;
+        cacheCreationCostPer1M = 1.0;
+    } else {
+        // Claude Sonnet 4.5 pricing (default)
+        // Input: $3.00, Output: $15.00
+        // Cache read: $0.30 (90% discount), Cache creation: $3.75 (25% premium)
+        inputCostPer1M = 3.0;
+        outputCostPer1M = 15.0;
+        cacheReadCostPer1M = 0.30;
+        cacheCreationCostPer1M = 3.75;
+    }
+
+    const regularInputTokens = promptTokens - cacheReadTokens - cacheCreationTokens;
+    const inputCost = (regularInputTokens / 1_000_000) * inputCostPer1M;
+    const outputCost = (completionTokens / 1_000_000) * outputCostPer1M;
+    const cacheReadCost = (cacheReadTokens / 1_000_000) * cacheReadCostPer1M;
+    const cacheCreationCost = (cacheCreationTokens / 1_000_000) * cacheCreationCostPer1M;
+
+    return {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: promptTokens + completionTokens,
+        estimated_cost_usd: inputCost + outputCost + cacheReadCost + cacheCreationCost,
+        model_used: model,
+        api_provider: 'claude'
+    };
+}
 
 // Perplexity API configuration
 const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
@@ -69,6 +135,7 @@ interface EnhancedProcessedResult extends ProcessedResult {
 // Type definitions
 interface FinancingOption {
     monthly_price: number;
+    old_monthly_price?: number;  // Previous price before campaign discount
     period_months: number;
     annual_mileage?: number;
     down_payment?: number;
@@ -89,8 +156,25 @@ interface VehicleModel {
     name: string;
     price?: number;
     old_price?: number;
+    // Flat financing prices (primary format)
+    privatleasing?: number;
+    old_privatleasing?: number;  // Campaign: original monthly price before discount
+    company_leasing_price?: number;
+    old_company_leasing_price?: number;  // Campaign: original monthly price before discount
+    loan_price?: number;
+    old_loan_price?: number;  // Campaign: original monthly price before discount
+    // Legacy nested format
     financing_options?: FinancingOptions;
     thumbnail?: string;
+    // Vehicle specifications
+    bransle?: string;      // Fuel type: El, Bensin, Diesel, Hybrid, Laddhybrid
+    biltyp?: string;       // Vehicle type: suv, sedan, kombi, halvkombi, cab, coupe, minibuss, pickup, transportbil
+    vaxellada?: string;    // Transmission: Automat, Manuell
+    fuel_type?: string;    // Alias for bransle
+    car_type?: string;     // Alias for biltyp
+    transmission?: string; // Alias for vaxellada
+    price_source?: 'pdf' | 'html';  // Track where price came from - PDF takes priority
+    utrustning?: string[]; // Equipment list for this trim level
 }
 
 interface WhatsIncluded {
@@ -105,6 +189,10 @@ interface Vehicle {
     thumbnail?: string;
     vehicle_model?: VehicleModel[];
     free_text?: string;
+    vehicle_type?: 'cars' | 'transport_cars';  // Main category: personbil or transportbil
+    body_type?: string;  // Body style: suv, sedan, kombi, halvkombi, cab, coupe, minibuss, pickup, etc.
+    source_url?: string;  // URL of the page where this vehicle was found
+    pdf_source_url?: string;  // URL of the PDF where pricing data was extracted
 }
 
 interface Campaign {
@@ -126,7 +214,7 @@ interface TokenUsage {
     total_tokens: number;
     estimated_cost_usd?: number;
     model_used?: string;
-    api_provider?: 'openai' | 'perplexity';
+    api_provider?: 'claude' | 'perplexity';
 }
 
 interface BatchProcessResult {
@@ -554,18 +642,38 @@ function applySuggestedFixes(
 
 function generateVehicleKey(vehicle: VehicleModel, parentBrand?: string): string {
     const name = (vehicle.name || '').toLowerCase().trim();
-    const brand = parentBrand || '';
-    const price = vehicle.price || 0;
+    const brand = (parentBrand || '').toLowerCase().trim();
 
-    // More aggressive normalization
+    // Aggressive normalization for better deduplication
     const normalizedName = name
         .replace(/\s+/g, ' ')
         .replace(/[-_]/g, ' ')
-        .replace(/\b(nya|new|2024|2025|hybrid|e:hev|fullhybrid)\b/g, '') // Remove more common variations
-        .replace(/\b(elegance|advance|sport|style|plus)\b/g, '') // Remove trim levels for base comparison
+        // Remove year variations
+        .replace(/\b(nya|new|2024|2025|2026)\b/gi, '')
+        // Remove hybrid/electric variations (normalize for matching)
+        .replace(/\b(e:hev|fullhybrid|mildhybrid|plug-in|phev|hev)\b/gi, 'hybrid')
+        .replace(/\b(electric|ev|bev)\b/gi, 'el')
+        // Normalize common trim level names
+        .replace(/\b(elegance|advance|sport|style|plus|comfort|premium|executive|limited)\b/gi, '')
+        // Remove common Swedish words
+        .replace(/\b(med|och|för|till)\b/gi, '')
+        // Remove extra spaces
+        .replace(/\s+/g, ' ')
         .trim();
 
+    // Create a key that captures the essential identity of the variant
     return `${brand}:${normalizedName}`;
+}
+
+/**
+ * Normalize variant name for display (keeps important info but cleans formatting)
+ */
+function normalizeVariantName(name: string): string {
+    return name
+        .trim()
+        .replace(/\s+/g, ' ')
+        .replace(/\s*-\s*/g, ' ')
+        .trim();
 }
 
 function generateVehicleMainKey(vehicle: Vehicle): string {
@@ -695,18 +803,45 @@ function intelligentMergeVehicles(existing: Vehicle, duplicate: Vehicle): Vehicl
 function intelligentMergeVehicleModels(existing: VehicleModel, duplicate: VehicleModel): VehicleModel {
     const merged: VehicleModel = { ...existing };
 
-    // Prefer longer, more descriptive names
+    // Prefer longer, more descriptive names (but normalize)
     if (duplicate.name && duplicate.name.length > existing.name.length) {
-        merged.name = duplicate.name;
+        merged.name = normalizeVariantName(duplicate.name);
+    } else if (existing.name) {
+        merged.name = normalizeVariantName(existing.name);
     }
 
-    // Prefer actual prices over null/0
-    if (duplicate.price && duplicate.price > 0 && (!existing.price || existing.price === 0)) {
-        merged.price = duplicate.price;
-    }
+    // ============================================
+    // PRICE PRIORITY: PDF > HTML
+    // ============================================
+    // PDF prices are more reliable (official price lists)
+    // Always prefer PDF prices over HTML prices
 
-    if (duplicate.old_price && duplicate.old_price > 0 && (!existing.old_price || existing.old_price === 0)) {
-        merged.old_price = duplicate.old_price;
+    const existingFromPdf = existing.price_source === 'pdf';
+    const duplicateFromPdf = duplicate.price_source === 'pdf';
+
+    if (duplicateFromPdf && !existingFromPdf) {
+        // Duplicate is from PDF, existing is from HTML - use PDF price
+        if (duplicate.price && duplicate.price > 0) {
+            merged.price = duplicate.price;
+            merged.price_source = 'pdf';
+            console.log(`📄 PDF price priority: Using ${duplicate.price} SEK from PDF (was ${existing.price} from HTML)`);
+        }
+        if (duplicate.old_price && duplicate.old_price > 0) {
+            merged.old_price = duplicate.old_price;
+        }
+    } else if (existingFromPdf && !duplicateFromPdf) {
+        // Existing is from PDF, keep it - don't override with HTML price
+        merged.price_source = 'pdf';
+        console.log(`📄 PDF price priority: Keeping ${existing.price} SEK from PDF (ignoring ${duplicate.price} from HTML)`);
+    } else {
+        // Both from same source or both have no source - prefer actual prices over null/0
+        if (duplicate.price && duplicate.price > 0 && (!existing.price || existing.price === 0)) {
+            merged.price = duplicate.price;
+            merged.price_source = duplicate.price_source;
+        }
+        if (duplicate.old_price && duplicate.old_price > 0 && (!existing.old_price || existing.old_price === 0)) {
+            merged.old_price = duplicate.old_price;
+        }
     }
 
     // Prefer non-generic thumbnails
@@ -716,6 +851,11 @@ function intelligentMergeVehicleModels(existing: VehicleModel, duplicate: Vehicl
             duplicate.thumbnail.length > existing.thumbnail.length)) {
         merged.thumbnail = duplicate.thumbnail;
     }
+
+    // Merge vehicle specifications - prefer values that are set
+    if (duplicate.bransle && !existing.bransle) merged.bransle = duplicate.bransle;
+    if (duplicate.biltyp && !existing.biltyp) merged.biltyp = duplicate.biltyp;
+    if (duplicate.vaxellada && !existing.vaxellada) merged.vaxellada = duplicate.vaxellada;
 
     // Merge financing options intelligently
     if (duplicate.financing_options && existing.financing_options) {
@@ -1002,14 +1142,233 @@ function deduplicateExtractedData(data: (Vehicle | Campaign)[], contentType: str
 
     return deduplicatedData;
 }
-async function analyzeImages(imageUrls: string[]): Promise<string | null> {
+
+// Validate and fix image-to-vehicle matching
+function validateAndFixImageMatching(vehicles: Vehicle[], availableImages: string[]): Vehicle[] {
+    console.log(`🔍 Validating image matching for ${vehicles.length} vehicles with ${availableImages.length} available images`);
+
+    // Common car model names to check against
+    // IMPORTANT: More specific models (like evitara) must come BEFORE generic ones (vitara)
+    // to ensure proper matching - otherwise "evitara" would match "vitara" first
+    const carModelKeywords = [
+        // Suzuki - evitara/e-vitara MUST come before vitara to avoid false matches
+        'evitara', 'e-vitara', 'swift', 's-cross', 'scross', 'jimny', 'across', 'swace', 'ignis', 'baleno', 'vitara',
+        // Peugeot
+        '208', '308', '408', '508', '2008', '3008', '5008', 'rifter', 'partner', 'expert', 'traveller',
+        // Opel
+        'corsa', 'astra', 'mokka', 'crossland', 'grandland', 'combo', 'vivaro', 'movano', 'zafira',
+        // Toyota
+        'yaris', 'corolla', 'camry', 'rav4', 'highlander', 'hilux', 'proace', 'aygo', 'prius',
+        // Volvo
+        'xc40', 'xc60', 'xc90', 's60', 's90', 'v60', 'v90', 'c40', 'ex30', 'ex90',
+        // VW
+        'golf', 'polo', 'passat', 'tiguan', 'touareg', 't-roc', 'troc', 't-cross', 'tcross', 'id3', 'id4', 'id5', 'arteon', 'taigo',
+        // Other
+        'kona', 'tucson', 'ioniq', 'sportage', 'niro', 'ev6', 'qashqai', 'juke', 'leaf'
+    ];
+
+    // Function to extract model name from vehicle title
+    const extractModelName = (title: string): string | null => {
+        const titleLower = title.toLowerCase().replace(/[^a-z0-9]/g, '');
+        for (const model of carModelKeywords) {
+            if (titleLower.includes(model.replace(/[^a-z0-9]/g, ''))) {
+                return model;
+            }
+        }
+        return null;
+    };
+
+    // Function to find best matching image for a vehicle
+    const findBestImageForVehicle = (vehicle: Vehicle, usedImages: Set<string>): string | null => {
+        const modelName = extractModelName(vehicle.title);
+        if (!modelName) {
+            console.log(`  ⚠️ Could not extract model name from "${vehicle.title}"`);
+            return null;
+        }
+
+        // Look for image that contains the model name
+        for (const imageUrl of availableImages) {
+            if (usedImages.has(imageUrl)) continue;
+
+            const imageLower = imageUrl.toLowerCase();
+            const imageFileName = imageLower.substring(imageLower.lastIndexOf('/') + 1);
+
+            // SPECIAL CASE: eVitara vs Vitara - need exact matching
+            if (modelName === 'evitara' || modelName === 'e-vitara') {
+                const hasEVitara = imageFileName.includes('evitara') ||
+                                  imageFileName.includes('e-vitara') ||
+                                  imageFileName.includes('e_vitara');
+                if (hasEVitara) {
+                    console.log(`  ✅ Found matching eVitara image for "${vehicle.title}": ${imageFileName}`);
+                    return imageUrl;
+                }
+                // Skip plain Vitara images for eVitara
+                continue;
+            }
+
+            if (modelName === 'vitara') {
+                // For plain Vitara, skip eVitara images
+                const hasEVitara = imageFileName.includes('evitara') ||
+                                  imageFileName.includes('e-vitara') ||
+                                  imageFileName.includes('e_vitara');
+                if (hasEVitara) {
+                    continue;
+                }
+                if (imageFileName.includes('vitara')) {
+                    console.log(`  ✅ Found matching Vitara image for "${vehicle.title}": ${imageFileName}`);
+                    return imageUrl;
+                }
+                continue;
+            }
+
+            // Standard matching for other models
+            const modelVariants = [
+                modelName,
+                modelName.replace('-', ''),
+                modelName.replace('-', '_')
+            ];
+
+            for (const variant of modelVariants) {
+                if (imageLower.includes(variant)) {
+                    console.log(`  ✅ Found matching image for "${vehicle.title}": ${imageUrl.substring(imageUrl.lastIndexOf('/') + 1)}`);
+                    return imageUrl;
+                }
+            }
+        }
+
+        return null;
+    };
+
+    // Function to check if image matches vehicle
+    const imageMatchesVehicle = (imageUrl: string | undefined, vehicleTitle: string): boolean => {
+        if (!imageUrl) return false;
+
+        const modelName = extractModelName(vehicleTitle);
+        if (!modelName) return true; // Can't validate, assume it's fine
+
+        const imageLower = imageUrl.toLowerCase();
+        const imageFileName = imageLower.substring(imageLower.lastIndexOf('/') + 1);
+
+        // SPECIAL CASE: eVitara vs Vitara distinction
+        // These need special handling because "vitara" is a substring of "evitara"
+        if (modelName === 'evitara' || modelName === 'e-vitara') {
+            // For eVitara, image must contain "evitara" or "e-vitara" or "e_vitara"
+            // but NOT just "vitara" without the "e" prefix
+            const hasEVitara = imageFileName.includes('evitara') ||
+                              imageFileName.includes('e-vitara') ||
+                              imageFileName.includes('e_vitara');
+
+            if (hasEVitara) {
+                return true;
+            }
+
+            // Check if it's a plain Vitara image (without "e" prefix)
+            // Pattern: starts with "vitara" or has "-vitara", "_vitara", or "/vitara"
+            const isPlainVitara = /(?:^|[-_\/])vitara(?:[-_\/\.]|$)/i.test(imageFileName) && !hasEVitara;
+            if (isPlainVitara) {
+                console.log(`  ⚠️ Image "${imageFileName}" is for Vitara, not eVitara`);
+                return false;
+            }
+
+            // Generic image, allow it
+            return true;
+        }
+
+        if (modelName === 'vitara') {
+            // For plain Vitara, reject images that contain "evitara"
+            const hasEVitara = imageFileName.includes('evitara') ||
+                              imageFileName.includes('e-vitara') ||
+                              imageFileName.includes('e_vitara');
+            if (hasEVitara) {
+                console.log(`  ⚠️ Image "${imageFileName}" is for eVitara, not Vitara`);
+                return false;
+            }
+            // Check for plain vitara match
+            if (imageFileName.includes('vitara')) {
+                return true;
+            }
+        }
+
+        // Check if image contains vehicle model name
+        const modelVariants = [
+            modelName,
+            modelName.replace('-', ''),
+            modelName.replace('-', '_')
+        ];
+
+        for (const variant of modelVariants) {
+            if (imageLower.includes(variant)) {
+                return true;
+            }
+        }
+
+        // Check if image contains a DIFFERENT model name (wrong match)
+        for (const otherModel of carModelKeywords) {
+            if (otherModel !== modelName && imageLower.includes(otherModel.replace(/[^a-z0-9]/g, ''))) {
+                // Skip vitara/evitara comparison here - handled above
+                if ((modelName === 'vitara' || modelName === 'evitara' || modelName === 'e-vitara') &&
+                    (otherModel === 'vitara' || otherModel === 'evitara' || otherModel === 'e-vitara')) {
+                    continue;
+                }
+                // Image contains a different model name - likely wrong
+                console.log(`  ⚠️ Image "${imageUrl.substring(imageUrl.lastIndexOf('/') + 1)}" seems to be for ${otherModel}, not ${vehicleTitle}`);
+                return false;
+            }
+        }
+
+        // Image doesn't contain any model name - could be generic, allow it
+        return true;
+    };
+
+    const usedImages = new Set<string>();
+    const fixedVehicles: Vehicle[] = [];
+
+    for (const vehicle of vehicles) {
+        const currentImage = vehicle.thumbnail;
+
+        // Check if current image is valid for this vehicle
+        const isValid = imageMatchesVehicle(currentImage, vehicle.title);
+
+        if (!isValid || !currentImage) {
+            // Try to find a better image
+            const betterImage = findBestImageForVehicle(vehicle, usedImages);
+
+            if (betterImage) {
+                console.log(`  🔄 Replacing image for "${vehicle.title}"`);
+                fixedVehicles.push({
+                    ...vehicle,
+                    thumbnail: betterImage
+                });
+                usedImages.add(betterImage);
+            } else if (currentImage && !isValid) {
+                // Image is wrong but no better option found - clear it
+                console.log(`  ❌ Clearing invalid image for "${vehicle.title}" (no valid replacement found)`);
+                fixedVehicles.push({
+                    ...vehicle,
+                    thumbnail: undefined
+                });
+            } else {
+                fixedVehicles.push(vehicle);
+            }
+        } else {
+            // Image is valid, mark as used
+            if (currentImage) usedImages.add(currentImage);
+            fixedVehicles.push(vehicle);
+        }
+    }
+
+    console.log(`🔍 Image validation complete`);
+    return fixedVehicles;
+}
+
+async function analyzeImages(imageUrls: string[], vehicleName?: string, vehicleBrand?: string): Promise<string | null> {
     if (!imageUrls || imageUrls.length === 0) {
         console.log(`No images provided for analysis`);
         return null;
     }
 
     try {
-        // Minimal filtering - only remove obviously broken/invalid URLs
+        // Filter out invalid URLs and obvious non-car images
         const processedUrls = imageUrls
             .filter(url => {
                 if (!url || url.includes('data:image') || url.includes('placeholder') || url.includes('loading.gif') || url.length < 10) {
@@ -1024,6 +1383,31 @@ async function analyzeImages(imageUrls: string[]): Promise<string | null> {
                     console.log(`Filtered out non-image URL: ${url}`);
                 }
                 return hasImageExt;
+            })
+            .filter(url => {
+                // Pre-filter obvious non-car images before sending to AI
+                const urlLower = url.toLowerCase();
+                const filename = urlLower.substring(urlLower.lastIndexOf('/') + 1);
+
+                // Reject obvious logos, icons, and UI elements
+                if (filename.includes('logo') || filename.includes('icon') || filename.includes('favicon')) {
+                    console.log(`Pre-filtered logo/icon: ${filename}`);
+                    return false;
+                }
+
+                // Reject obvious price/campaign graphics
+                if (filename.includes('prisplatta') || filename.includes('pris-') || filename.includes('-pris')) {
+                    console.log(`Pre-filtered price plate: ${filename}`);
+                    return false;
+                }
+
+                // Reject arrows, navigation elements
+                if (filename.includes('arrow') || filename.includes('chevron') || filename.includes('nav-')) {
+                    console.log(`Pre-filtered UI element: ${filename}`);
+                    return false;
+                }
+
+                return true;
             })
             .slice(0, 12);
 
@@ -1040,99 +1424,52 @@ async function analyzeImages(imageUrls: string[]): Promise<string | null> {
             console.log(`     Full URL: ${url}`);
         });
 
-        console.log(`📡 Making OpenAI API call...`);
+        // Use Claude for image selection (prefers environmental backgrounds)
+        // Skip AI image selection in TEST_MODE to speed up testing
+        const testMode = process.env.TEST_MODE === 'true';
+        if (USE_CLAUDE && vehicleName && vehicleBrand && !testMode) {
+            console.log(`🚀 Using Claude for image selection (prefers environmental backgrounds)...`);
 
-        const completion = await openai.chat.completions.create({
-            model: 'gpt-5',
-            messages: [
-                {
-                    role: 'system',
-                    content: `You are an expert at analyzing automotive images. Your task is to select the single best image from a list to be used as a car listing thumbnail.
-
-SELECTION CRITERIA (in order of importance):
-1.  **Must show the exterior of an actual car or vehicle.**
-2.  **The car must be the primary subject.** The image should not be focused on a tiny detail like a wheel, a badge, or a headlight.
-3.  **The car should be clearly visible.** Do not select images that are blurry, heavily obscured, or where the vehicle is too small to be a good thumbnail.
-4.  **Acceptable views include the full side, front, or three-quarter angles.**
-5.  **Professional product shots, including those with plain backgrounds, are ideal.**
-6.  Avoid images that are primarily text, logos, or graphics without a visible car.
-
-IMPORTANT: Return **ONLY** the complete URL of the single best image. If no images contain a clearly visible car exterior, return "none".
-
-Example rejection response: none`
-                },
-                {
-                    role: 'user',
-                    content: [
-                        {
-                            type: 'text',
-                            text: `Select the image that shows a car most clearly and prominently. Return the COMPLETE URL exactly as provided in the list above.`
-                        },
-                        ...processedUrls.map(url => ({
-                            type: 'image_url' as const,
-                            image_url: { url, detail: 'low' as const }
-                        }))
-                    ]
-                }
-            ],
-        });
-
-        console.log(`📡 OpenAI API call completed`);
-
-        // Track token usage and cost
-        const usage = completion.usage;
-        if (usage) {
-            const tokenUsage = createTokenUsage(
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                'gpt-5',
-                'openai'
-            );
-            console.log(`💰 Token usage - Prompt: ${usage.prompt_tokens}, Completion: ${usage.completion_tokens}, Cost: $${tokenUsage.estimated_cost_usd.toFixed(6)}`);
-        }
-
-        const rawResponse = completion.choices[0]?.message?.content;
-        console.log(`🤖 Raw AI response: "${rawResponse}"`);
-
-        if (!rawResponse) {
-            console.log(`❌ No response content from OpenAI`);
-            return null;
-        }
-
-        const selectedUrl = rawResponse.trim();
-        console.log(`🤖 AI selected URL: "${selectedUrl}"`);
-        console.log(`🔍 Checking if URL is in processed list...`);
-
-        // Debug: show which URLs we're checking against
-        processedUrls.forEach((url, index) => {
-            const matches = url === selectedUrl;
-            console.log(`  ${index + 1}. ${matches ? '✅' : '❌'} ${url}`);
-        });
-
-        if (selectedUrl && selectedUrl !== 'none' && processedUrls.includes(selectedUrl)) {
-            const filename = selectedUrl.substring(selectedUrl.lastIndexOf('/') + 1);
-            console.log(`✅ AI successfully selected: ${filename}`);
-            return selectedUrl;
-        } else if (selectedUrl === 'none') {
-            console.log(`🚫 AI explicitly rejected all images (returned "none")`);
-            return null;
-        } else {
-            console.log(`⚠️ AI response not found in URL list. Response was: "${selectedUrl}"`);
-            console.log(`🔍 Available URLs were:`);
-            processedUrls.forEach((url, i) => console.log(`  ${i + 1}. ${url}`));
-
-            // Try to find a partial match in case of URL encoding issues
-            const partialMatch = processedUrls.find(url =>
-                url.includes(selectedUrl) || selectedUrl.includes(url.substring(url.lastIndexOf('/') + 1))
+            const claudeResult = await selectBestImageWithClaude(
+                vehicleName,
+                vehicleBrand,
+                processedUrls,
+                { model: 'fast' }
             );
 
-            if (partialMatch) {
-                console.log(`🔧 Found partial match: ${partialMatch}`);
-                return partialMatch;
+            if (claudeResult.success && claudeResult.selectedImageUrl) {
+                console.log(`✅ Claude selected: ${claudeResult.selectedImageUrl.substring(claudeResult.selectedImageUrl.lastIndexOf('/') + 1)}`);
+                console.log(`   Confidence: ${(claudeResult.confidence * 100).toFixed(0)}%`);
+                console.log(`   Reasoning: ${claudeResult.reasoning || 'N/A'}`);
+                console.log(`   Environmental background: ${claudeResult.hasEnvironmentalBackground ? 'Yes' : 'No'}`);
+                return claudeResult.selectedImageUrl;
+            } else {
+                console.warn(`⚠️ Claude image selection failed: ${claudeResult.error}`);
+                // Fall through to simple selection
             }
-
-            return null;
         }
+
+        // Simple fallback: select first valid image if Claude not available
+        console.log(`📡 Using simple image selection (first valid image)...`);
+
+        // Try to find an image with the vehicle name in the URL
+        const vehicleNameLower = (vehicleName || '').toLowerCase();
+        const matchingImage = processedUrls.find(url =>
+            url.toLowerCase().includes(vehicleNameLower.split(' ')[0])
+        );
+
+        if (matchingImage) {
+            console.log(`✅ Found image matching vehicle name: ${matchingImage.substring(matchingImage.lastIndexOf('/') + 1)}`);
+            return matchingImage;
+        }
+
+        // Return first image as fallback
+        if (processedUrls.length > 0) {
+            console.log(`✅ Using first available image: ${processedUrls[0].substring(processedUrls[0].lastIndexOf('/') + 1)}`);
+            return processedUrls[0];
+        }
+
+        return null;
 
     } catch (error) {
         console.error('❌ Image analysis failed with error:', error);
@@ -1150,7 +1487,9 @@ async function enhanceWithImageAnalysis(item: Vehicle | Campaign, htmlContent: s
 
         console.log(`🖼️ Found ${availableImages.length} images for ${item.title}`);
 
-
+        // Extract vehicle name and brand for Claude image selection
+        const vehicleName = item.title || '';
+        const vehicleBrand = item.brand || '';
 
         // Enhance vehicle models with best images (but don't override if they already have good ones)
         if (item.vehicle_model && Array.isArray(item.vehicle_model)) {
@@ -1162,8 +1501,8 @@ async function enhanceWithImageAnalysis(item: Vehicle | Campaign, htmlContent: s
 
                 if (needsNewThumbnail && availableImages.length > 0) {
                     // For vehicle models, try to use the same image as the main item
-                    // or analyze again if we have many images
-                    const modelImage = item.thumbnail || await analyzeImages(availableImages);
+                    // or analyze again if we have many images with vehicle context
+                    const modelImage = item.thumbnail || await analyzeImages(availableImages, model.name || vehicleName, vehicleBrand);
                     if (modelImage) {
                         console.log(`🎯 Setting model thumbnail for ${model.name}: ${modelImage.substring(0, 80)}...`);
                         model.thumbnail = modelImage;
@@ -1315,35 +1654,107 @@ function getImagePriorityScore(url: string): number {
     const filename = urlLower.substring(urlLower.lastIndexOf('/') + 1);
     let score = 0;
 
-    // High priority indicators (likely car photos)
+    // VERY HIGH priority - Car model names from various brands
+    // Suzuki models
     if (filename.includes('vitara') || filename.includes('swift') || filename.includes('ignis') ||
-        filename.includes('sx4') || filename.includes('jimny') || filename.includes('across')) score += 50;
-    if (filename.includes('exterior') || filename.includes('front') || filename.includes('side')) score += 40;
-    if (filename.includes('hero') || filename.includes('main') || filename.includes('primary')) score += 30;
-    if (filename.includes('gallery') || filename.includes('photo')) score += 25;
-    if (urlLower.includes('vehicle') || urlLower.includes('car') || urlLower.includes('auto')) score += 20;
+        filename.includes('sx4') || filename.includes('jimny') || filename.includes('across') ||
+        filename.includes('s-cross') || filename.includes('baleno')) score += 60;
 
-    // Medium priority (could be car-related)
-    if (filename.includes('model') || filename.includes('range')) score += 15;
-    if (filename.includes('banner') && !filename.includes('pris')) score += 10;
+    // Peugeot models
+    if (filename.includes('208') || filename.includes('308') || filename.includes('408') ||
+        filename.includes('508') || filename.includes('2008') || filename.includes('3008') ||
+        filename.includes('5008') || filename.includes('rifter') || filename.includes('partner') ||
+        filename.includes('expert') || filename.includes('traveller')) score += 60;
 
-    // Low priority/likely not car photos
-    if (filename.includes('pris') || filename.includes('price') || filename.includes('kampanj')) score -= 30;
-    if (filename.includes('platta') || filename.includes('plate') || filename.includes('badge')) score -= 40;
-    if (filename.includes('logo') || filename.includes('icon')) score -= 50;
-    if (filename.includes('text') || filename.includes('info')) score -= 20;
+    // Opel models
+    if (filename.includes('corsa') || filename.includes('astra') || filename.includes('mokka') ||
+        filename.includes('crossland') || filename.includes('grandland') || filename.includes('combo') ||
+        filename.includes('vivaro') || filename.includes('movano') || filename.includes('zafira')) score += 60;
+
+    // Citroën models
+    if (filename.includes('c3') || filename.includes('c4') || filename.includes('c5') ||
+        filename.includes('berlingo') || filename.includes('spacetourer') || filename.includes('jumpy')) score += 60;
+
+    // Toyota models
+    if (filename.includes('yaris') || filename.includes('corolla') || filename.includes('camry') ||
+        filename.includes('rav4') || filename.includes('highlander') || filename.includes('land-cruiser') ||
+        filename.includes('hilux') || filename.includes('proace') || filename.includes('aygo')) score += 60;
+
+    // Volvo models
+    if (filename.includes('xc40') || filename.includes('xc60') || filename.includes('xc90') ||
+        filename.includes('s60') || filename.includes('s90') || filename.includes('v60') ||
+        filename.includes('v90') || filename.includes('c40') || filename.includes('ex30') ||
+        filename.includes('ex90')) score += 60;
+
+    // VW models
+    if (filename.includes('golf') || filename.includes('polo') || filename.includes('passat') ||
+        filename.includes('tiguan') || filename.includes('touareg') || filename.includes('t-roc') ||
+        filename.includes('t-cross') || filename.includes('id.3') || filename.includes('id.4') ||
+        filename.includes('id.5') || filename.includes('arteon') || filename.includes('taigo')) score += 60;
+
+    // Other common models
+    if (filename.includes('kona') || filename.includes('tucson') || filename.includes('ioniq') ||
+        filename.includes('sportage') || filename.includes('niro') || filename.includes('ev6') ||
+        filename.includes('qashqai') || filename.includes('juke') || filename.includes('leaf')) score += 60;
+
+    // HIGH priority - Exterior/view keywords
+    if (filename.includes('exterior') || filename.includes('front') || filename.includes('side') ||
+        filename.includes('rear') || filename.includes('quarter') || filename.includes('angle')) score += 45;
+
+    // HIGH priority - Product/studio shots
+    if (filename.includes('hero') || filename.includes('main') || filename.includes('primary') ||
+        filename.includes('product') || filename.includes('studio') || filename.includes('beauty')) score += 40;
+
+    // MEDIUM-HIGH priority - Gallery/photo keywords
+    if (filename.includes('gallery') || filename.includes('photo') || filename.includes('image') ||
+        filename.includes('picture') || filename.includes('view')) score += 30;
+
+    // MEDIUM priority - Vehicle-related keywords
+    if (urlLower.includes('vehicle') || urlLower.includes('car') || urlLower.includes('auto') ||
+        urlLower.includes('bil') || urlLower.includes('fordon')) score += 25;
+
+    // MEDIUM priority - Model/range keywords
+    if (filename.includes('model') || filename.includes('range') || filename.includes('lineup')) score += 20;
+
+    // LOW priority - Banners (only if not price-related)
+    if (filename.includes('banner') && !filename.includes('pris') && !filename.includes('price')) score += 10;
+
+    // NEGATIVE priority - Price/campaign graphics (these are NOT car photos)
+    if (filename.includes('pris') || filename.includes('price')) score -= 60;
+    if (filename.includes('kampanj') || filename.includes('campaign') || filename.includes('offer')) score -= 50;
+    if (filename.includes('erbjudande') || filename.includes('deal')) score -= 50;
+
+    // NEGATIVE priority - Plates/badges/labels
+    if (filename.includes('platta') || filename.includes('plate') || filename.includes('badge')) score -= 60;
+    if (filename.includes('label') || filename.includes('tag') || filename.includes('sticker')) score -= 50;
+
+    // NEGATIVE priority - Logos/icons/graphics
+    if (filename.includes('logo') || filename.includes('icon') || filename.includes('symbol')) score -= 70;
+    if (filename.includes('text') || filename.includes('info') || filename.includes('button')) score -= 40;
+
+    // NEGATIVE priority - UI elements
+    if (filename.includes('arrow') || filename.includes('nav') || filename.includes('menu')) score -= 50;
+    if (filename.includes('background') || filename.includes('bg-') || filename.includes('_bg')) score -= 40;
+
+    // NEGATIVE priority - Small/thumbnail indicators (we want full-size)
+    if (filename.includes('thumb') || filename.includes('small') || filename.includes('mini')) score -= 20;
+    if (filename.includes('_s.') || filename.includes('_xs.') || filename.includes('_sm.')) score -= 20;
 
     // Prefer higher resolution images
-    if (url.includes('w=3840') || url.includes('1920') || url.includes('2048')) score += 15;
-    if (url.includes('w=1200') || url.includes('1080')) score += 10;
-    if (url.includes('w=640') || url.includes('w=750')) score += 5;
+    if (url.includes('w=3840') || url.includes('1920') || url.includes('2048') || url.includes('4k')) score += 20;
+    if (url.includes('w=1200') || url.includes('1080') || url.includes('hd')) score += 15;
+    if (url.includes('w=640') || url.includes('w=750') || url.includes('w=828')) score += 8;
 
     // Prefer certain file types
     if (filename.endsWith('.jpg') || filename.endsWith('.jpeg')) score += 5;
     if (filename.endsWith('.webp')) score += 3;
     if (filename.endsWith('.png') && !filename.includes('logo')) score += 2;
 
-    return Math.max(0, score); // Don't go below 0
+    // Bonus for images from known car image paths
+    if (urlLower.includes('/models/') || urlLower.includes('/vehicles/') || urlLower.includes('/cars/')) score += 25;
+    if (urlLower.includes('/bilar/') || urlLower.includes('/fordon/') || urlLower.includes('/modeller/')) score += 25;
+
+    return score; // Can go negative to filter out bad images
 }
 
 
@@ -1354,16 +1765,80 @@ function getOptimizedPrompt(contentType: string): { system: string; user: string
 ESSENTIAL RULES:
 - Return ONLY valid JSON, no explanations
 - Convert Swedish prices (kr) to numbers: "319.900:-" → 319900
-- Extract images from img tags, src attributes, data-src attributes
 - Keep descriptions under 160 characters
 - For financing options, extract ALL available terms (12, 24, 36, 48 months etc.)
 - Look for different prices based on contract length/terms
-- Extract mileage limits (1000 mil/år, 1500 mil/år etc.) 
+- Extract mileage limits (1000 mil/år, 1500 mil/år etc.)
 - Extract down payments and interest rates when mentioned
 - If only one financing option per type, still put it in an array
 - Use null for missing values, empty arrays [] for missing financing types
 - AVOID DUPLICATES: If you see similar vehicles/campaigns with the same name, combine their information instead of creating separate entries
 - For vehicle models with the same name but different variants, create ONE vehicle with multiple financing options or specifications
+
+CAMPAIGN/DISCOUNT PRICING - Extract OLD prices when available:
+- Look for strikethrough prices, "ord. pris", "tidigare", "från X kr till Y kr"
+- For purchase prices: old_price = original price before discount, price = current discounted price
+- For financing (privatleasing, company_leasing, loan): old_monthly_price = original monthly cost, monthly_price = discounted
+- Common patterns: "2 995 kr/mån (ord. 3 495 kr)", price crossed out with new price below
+- If no discount/campaign, set old_monthly_price to null
+
+CRITICAL - PDF PRICELIST DATA:
+- If the content contains "<!-- PDF CONTENT FROM:" sections, use this as the PRIMARY source for vehicle variants and prices
+- PDF pricelists contain the official price data - extract EVERY row that has pricing information
+
+PDF TABLE STRUCTURE RECOGNITION:
+- Swedish car pricelists follow a TABLE format with columns like:
+  * MODELL (model/variant name with technical specs)
+  * Rek.cirkapris / Kontantpris (purchase price in kr)
+  * Billån/mån (loan monthly payment)
+  * PL/mån or Privatleasing/mån (private leasing monthly)
+  * Sometimes: Elförbrukning, Räckvidd, Skatt, CO2, etc.
+
+HOW TO IDENTIFY VARIANTS vs SECTION HEADERS:
+- SECTION HEADERS: Text in ALL CAPS or bold with equipment level names (BASE, SELECT, INCLUSIVE, STYLE, COMFORT) but NO technical specs and NO prices
+- ACTUAL VARIANT ROWS: Have BOTH technical specifications AND price data on the same row
+- Technical specs include: kWh (battery), hk (horsepower), engine size (1.2, 1.5, etc.), drivetrain (2WD, 4x4, AWD, AllGrip)
+
+COUNTING RULE - A variant is ONLY a row that has:
+1. Technical specifications (battery kWh, engine size, horsepower, drivetrain like 2WD/4x4)
+2. At least ONE price (Rek.cirkapris OR Billån/mån OR PL/mån)
+Count ALL rows matching this pattern - do not skip any!
+
+PDF VARIANT EXTRACTION - SIMPLE RULE:
+Every row with a price = one variant. Copy the EXACT text from that row as the variant name.
+
+CRITICAL: Do NOT simplify variant names - use them EXACTLY as written in the PDF:
+- "49 kWh 2WD Base" → name: "49 kWh 2WD Base" (NOT just "Base")
+- "61 kWh 4x4 Inclusive" → name: "61 kWh 4x4 Inclusive"
+- "1.2 82 hk Hybrid Select CVT" → name: "1.2 82 hk Hybrid Select CVT"
+
+Section headers without prices are NOT variants - skip them.
+
+CAMPAIGN PRICES - Extract BOTH current and original:
+- Current price: The main visible price number
+- Original price: Look for "(ord. pris X kr)" or "(ord. X kr)" patterns - store in old_price, old_privatleasing, old_loan_price
+- PDF prices take precedence over HTML prices
+
+CRITICAL IMAGE MATCHING RULES:
+- Each vehicle MUST have its OWN correct image - do NOT use the same image for multiple vehicles
+- Look for images that are DIRECTLY associated with each specific car model
+- Match images by looking at:
+  * Images inside the same HTML container/section as the car name
+  * Image filenames containing the model name (e.g., "swift_2000x2000.jpg" for Swift)
+  * Alt text or data attributes mentioning the model name
+  * JSON data structures linking models to their images (mediaItemUrl, menu.image, etc.)
+- If a page lists multiple cars (Swift, Vitara, S-Cross, etc.), each MUST get its own unique image
+- NEVER assign one car's image to another car
+- If you cannot find a specific image for a model, use null instead of using another car's image
+- CRITICAL: Be careful with similar model names like "eVitara" vs "Vitara" - they are COMPLETELY DIFFERENT cars:
+  * "eVitara" or "e Vitara" or "e-Vitara" = ELECTRIC version
+    - MUST use images with "evitara" or "e-vitara" or "e_vitara" in the filename
+    - Example: "eVITARA_header_pris_start_16-9.jpg" = CORRECT for eVitara
+  * "Vitara" (without "e" prefix) = HYBRID/petrol version
+    - MUST use images with "vitara" in filename but NOT "evitara"
+    - Example: "Vitara-miljo-10-3x2-1.jpg" = CORRECT for Vitara, WRONG for eVitara
+  * ALWAYS check the exact filename before assigning an image!
+  * If the filename starts with just "Vitara" (not "eVitara"), it belongs to regular Vitara only
 
 JSON STRUCTURE:
 - The output should be a single JSON object.
@@ -1398,40 +1873,15 @@ JSON STRUCTURE - Return an array with the main campaign:
       "brand": "string (e.g., Peugeot, Suzuki, Opel)",
       "vehicle_model": [
         {
-          "name": "string (exact model name)",
+          "name": "string (FULL variant name, e.g. '1.2 82 hk Hybrid Base')",
           "price": number,
-          "old_price": number,
-          "financing_options": {
-            "privatleasing": [
-              {
-                "monthly_price": number,
-                "period_months": number,
-                "annual_mileage": number,
-                "down_payment": number,
-                "conditions": "string (any special conditions)"
-              }
-            ],
-            "company_leasing": [
-              {
-                "monthly_price": number,
-                "period_months": number,
-                "annual_mileage": number,
-                "down_payment": number,
-                "benefit_value": number,
-                "conditions": "string (any special conditions)"
-              }
-            ],
-            "loan": [
-              {
-                "monthly_price": number,
-                "period_months": number,
-                "interest_rate": number,
-                "down_payment_percent": number,
-                "total_amount": number,
-                "conditions": "string (any special conditions)"
-              }
-            ]
-          },
+          "old_price": number or null (original price before campaign discount),
+          "privatleasing": number (monthly price in kr),
+          "old_privatleasing": number or null (original monthly price, e.g. from "ord. pris X kr"),
+          "company_leasing_price": number (monthly price in kr),
+          "old_company_leasing_price": number or null (original monthly price before campaign),
+          "loan_price": number (monthly price in kr),
+          "old_loan_price": number or null (original monthly price, e.g. from "ord. pris X kr"),
           "thumbnail": "string (model-specific image path)"
         }
       ],
@@ -1452,55 +1902,75 @@ DUPLICATE PREVENTION FOR VEHICLES:
 - Use the most complete information available (best price, most financing options, etc.)
 - For vehicles with same name but different trim levels, treat as separate models under the same vehicle
 
+IMAGE EXTRACTION - CRITICAL:
+- For each vehicle, find the image that belongs SPECIFICALLY to that car
+- Look for img tags, background-image URLs, or JSON data (mediaItemUrl, menu, image fields)
+- Match by: filename containing model name, proximity in HTML to car name, alt text
+- Example: For "Swift", look for URLs containing "swift", not "vitara"
+- If multiple cars on page, each needs its OWN distinct image URL
+- Prefer high-resolution images (look for 2000x, 1920x, 1200x in URL)
+
+VEHICLE TYPE CLASSIFICATION:
+- Determine "vehicle_type": "cars" for personbilar (passenger cars), "transport_cars" for transportbilar (vans, trucks)
+- Determine "body_type" based on vehicle description and name. Valid body types:
+  * "suv" - SUV, crossover (e.g., Vitara, eVitara, S-Cross)
+  * "sedan" - Traditional sedan
+  * "kombi" - Station wagon/estate (e.g., Peugeot 308 SW)
+  * "halvkombi" - Hatchback (e.g., Swift, 208)
+  * "cab" - Cabriolet/convertible
+  * "coupe" - Coupe/sporty 2-door
+  * "minibuss" - MPV/minivan (e.g., Rifter)
+  * "pickup" - Pickup truck
+  * "skåpbil" - Van/panel van (for transport vehicles)
+- Use vehicle name, description and context clues to determine body type
+
 JSON STRUCTURE - Return an array of vehicles:
 {
   "${contentType}": [{
-    "title": "string",
-    "brand": "string", 
+    "title": "string (car model name, e.g., 'Swift', 'Vitara', 'e VITARA')",
+    "brand": "string (e.g., 'Suzuki', 'Peugeot')",
     "description": "string (max 160)",
-    "thumbnail": "string",
-    "vehicle_model": [{
-      "name": "string", 
-      "price": number, 
-      "old_price": number, 
-      "financing_options": {
-        "privatleasing": [
-          {
-            "monthly_price": number,
-            "period_months": number,
-            "annual_mileage": number,
-            "down_payment": number,
-            "conditions": "string"
-          }
-        ],
-        "company_leasing": [
-          {
-            "monthly_price": number,
-            "period_months": number,
-            "annual_mileage": number,
-            "down_payment": number,
-            "benefit_value": number,
-            "conditions": "string"
-          }
-        ],
-        "loan": [
-          {
-            "monthly_price": number,
-            "period_months": number,
-            "interest_rate": number,
-            "down_payment_percent": number,
-            "total_amount": number,
-            "conditions": "string"
-          }
-        ]
-      },
-      "thumbnail": "string"
+    "thumbnail": "string (FULL image URL specific to THIS car - must match the model)",
+    "vehicle_type": "cars" or "transport_cars",
+    "body_type": "suv" | "sedan" | "kombi" | "halvkombi" | "cab" | "coupe" | "minibuss" | "pickup" | "skåpbil",
+    "source_url": "string (the URL of the page where this vehicle was found, from <!-- URL: ... --> comment)",
+    "vehicle_model": [
+      // ONE entry per PDF row with pricing - use EXACT text from PDF as name
+      {
+      "name": "string (EXACT variant name from PDF row - e.g. '49 kWh 2WD Base', '1.2 82 hk Hybrid Select CVT')",
+      "price": number,
+      "old_price": number or null (original price before campaign discount),
+      "bransle": "El" | "Bensin" | "Diesel" | "Hybrid" | "Laddhybrid" (extract from variant name: 'Hybrid' = Hybrid, 'el'/'kwh' = El, 'diesel' = Diesel)",
+      "vaxellada": "Automat" | "Manuell" (extract from variant: 'CVT'/'Auto' = Automat, otherwise = Manuell)",
+      "biltyp": "suv" | "sedan" | "kombi" | "halvkombi" | "cab" | "coupe" | "pickup" | null,
+      "privatleasing": number (monthly price in kr),
+      "old_privatleasing": number or null (original monthly price before campaign, e.g. from "ord. pris X kr"),
+      "company_leasing_price": number (monthly price in kr),
+      "old_company_leasing_price": number or null (original monthly price before campaign),
+      "loan_price": number (monthly price in kr),
+      "old_loan_price": number or null (original monthly price before campaign, e.g. from "ord. pris X kr"),
+      "thumbnail": "string (variant-specific image if available)"
     }],
     "free_text": "string"
   }]
-}`;
+}
 
-    const user = `Analyze the following HTML content and extract all relevant information based on the instructions in the system prompt. Avoid creating duplicate entries for the same vehicles or campaigns. Return the data as a single JSON object.`;
+EXTRACTING VEHICLE SPECS FROM VARIANT NAMES:
+- "1.2 82 hk Hybrid Base" → bransle: "Hybrid", vaxellada: "Manuell"
+- "1.2 82 hk Hybrid Select CVT" → bransle: "Hybrid", vaxellada: "Automat" (CVT = automatic)
+- "1.2 82 hk Hybrid Select AllGrip Auto 4x4" → bransle: "Hybrid", vaxellada: "Automat" (Auto = automatic)
+- "61 kWh 4x4 Inclusive" → bransle: "El" (kWh indicates electric), vaxellada: "Automat"
+
+SOURCE URL EXTRACTION:
+- Look for <!-- URL: https://... --> comments in the HTML to find the source page URL
+- Each vehicle should have its source_url set to the page it was found on`;
+
+    const user = `Analyze the following HTML content and extract all relevant information based on the instructions in the system prompt.
+
+IMPORTANT:
+- Avoid creating duplicate entries for the same vehicles or campaigns
+- Each vehicle MUST have its own CORRECT image URL - match images by model name in filename or alt text
+- Return the data as a single JSON object.`;
 
     return { system, user };
 }
@@ -1517,58 +1987,95 @@ async function processHtmlBatch(
         .trim();
 
     const prompts = getOptimizedPrompt(contentType);
+    let tokenUsage: TokenUsage | undefined;
 
-    const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-            { role: 'system', content: prompts.system },
-            { role: 'user', content: `${prompts.user}\n\nHTML CONTENT:\n${processedHtml}` },
-        ],
+    // Use Claude for HTML parsing
+    if (!USE_CLAUDE) {
+        throw new Error('Claude API not configured. Please set CLAUDE_API_KEY environment variable.');
+    }
+
+    console.log('🚀 Using Claude Haiku for HTML parsing (cost-efficient)...');
+
+    // Use the Claude client to extract vehicle data from HTML
+    // Using 'haiku' model for cost efficiency - ~75% cheaper than Sonnet
+    const claudeResult = await extractVehicleDataFromHTML(processedHtml, sourceUrl, {
+        useCache: true,
+        model: 'haiku',
     });
 
-    // Track token usage and cost
-    const usage = completion.usage;
-    let tokenUsage: TokenUsage | undefined;
-    if (usage) {
+    if (!claudeResult.success) {
+        throw new Error(`Claude extraction failed: ${claudeResult.error}`);
+    }
+
+    // Track token usage - use Haiku pricing since we're using Haiku model
+    if (claudeResult.usage) {
+        const claudeUsage = createClaudeTokenUsage(
+            claudeResult.usage.inputTokens,
+            claudeResult.usage.outputTokens,
+            'claude-haiku-3-5-20241022',  // Haiku model for correct cost calculation
+            claudeResult.usage.cacheReadTokens || 0,
+            claudeResult.usage.cacheCreationTokens || 0
+        );
         tokenUsage = {
-            prompt_tokens: usage.prompt_tokens,
-            completion_tokens: usage.completion_tokens,
-            total_tokens: usage.total_tokens,
-            estimated_cost_usd: createTokenUsage(usage.prompt_tokens, usage.completion_tokens, 'gpt-4o-mini', 'openai').estimated_cost_usd,
-            model_used: 'gpt-4o-mini',
-            api_provider: 'openai'
+            prompt_tokens: claudeUsage.prompt_tokens,
+            completion_tokens: claudeUsage.completion_tokens,
+            total_tokens: claudeUsage.total_tokens,
+            estimated_cost_usd: claudeUsage.estimated_cost_usd,
+            model_used: claudeUsage.model_used,
+            api_provider: 'claude' as const
         };
-        console.log(`💰 Batch processing token usage - Prompt: ${usage.prompt_tokens}, Completion: ${usage.completion_tokens}, Cost: $${tokenUsage.estimated_cost_usd?.toFixed(6)}`);
+        console.log(`💰 Claude token usage - Prompt: ${claudeUsage.prompt_tokens}, Completion: ${claudeUsage.completion_tokens}, Cost: $${claudeUsage.estimated_cost_usd.toFixed(6)}`);
     }
 
-    const response = completion.choices[0]?.message?.content;
-    if (!response) {
-        throw new Error('No response from OpenAI API');
-    }
+    // Convert Claude's vehicle format to internal format
+    const extractedVehicles = claudeResult.vehicles || [];
+    const convertedData: (Vehicle | Campaign)[] = extractedVehicles.map(v => ({
+        title: v.name,
+        brand: v.brand,
+        thumbnail: v.thumbnail,
+        description: v.description,
+        vehicle_type: v.vehicle_type || v.vehicleType || 'cars',
+        body_type: v.body_type || v.bodyType,
+        source_url: v.source_url || v.sourceUrl || sourceUrl,
+        free_text: v.free_text || v.freeText || '',
+        vehicle_model: v.vehicleModels?.map(m => ({
+            name: m.name,
+            price: m.price,
+            old_price: m.oldPrice,
+            // Flat financing prices (primary format for database)
+            privatleasing: m.privatleasing,
+            old_privatleasing: m.oldPrivatleasing,
+            company_leasing_price: m.companyLeasingPrice,
+            old_company_leasing_price: m.oldCompanyLeasingPrice,
+            loan_price: m.loanPrice,
+            old_loan_price: m.oldLoanPrice,
+            // Legacy nested format for backwards compatibility
+            financing_options: {
+                privatleasing: m.privatleasing ? [{ monthly_price: m.privatleasing, old_monthly_price: m.oldPrivatleasing, period_months: 36 }] : undefined,
+                company_leasing: m.companyLeasingPrice ? [{ monthly_price: m.companyLeasingPrice, old_monthly_price: m.oldCompanyLeasingPrice, period_months: 36 }] : undefined,
+                loan: m.loanPrice ? [{ monthly_price: m.loanPrice, old_monthly_price: m.oldLoanPrice, period_months: 60 }] : undefined,
+            },
+            thumbnail: m.thumbnail,
+            bransle: m.bransle,
+            biltyp: m.biltyp,
+            vaxellada: m.vaxellada,
+            utrustning: m.utrustning || [],
+        })) || [],
+    }));
 
-    let parsedData: Record<string, (Vehicle | Campaign)[]>;
-    try {
-        const cleaned = response.replace(/```(?:json)?\n?|\n?```/g, '').trim();
-        parsedData = JSON.parse(cleaned);
-    } catch (parseError) {
-        console.error('JSON parse error in batch:', parseError);
-        throw new Error(`Invalid JSON response from batch: ${parseError}`);
-    }
-
-    const extractedData = parsedData[contentType] || (Array.isArray(parsedData) ? parsedData : [parsedData]);
-
+    // Enhance with image analysis if enabled
     if (enableImageAnalysis) {
-        for (const item of extractedData) {
+        for (const item of convertedData) {
             await enhanceWithImageAnalysis(item, htmlSnippet, sourceUrl);
         }
     }
 
     return {
-        data: extractedData,
+        data: convertedData,
         token_usage: tokenUsage || {
-            prompt_tokens: completion.usage?.prompt_tokens || 0,
-            completion_tokens: completion.usage?.completion_tokens || 0,
-            total_tokens: completion.usage?.total_tokens || 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
         },
     };
 }
@@ -1586,10 +2093,17 @@ function convertToExternalVehicleModel(model: VehicleModel): ExternalVehicleMode
         name: model.name,
         price: model.price || 0,
         old_price: model.old_price,
-        privatleasing: extractFinancingPrice(model.financing_options?.privatleasing),
-        company_leasing_price: extractFinancingPrice(model.financing_options?.company_leasing),
-        loan_price: extractFinancingPrice(model.financing_options?.loan),
-        thumbnail: model.thumbnail || ''
+        // Use flat prices if available, otherwise extract from financing_options
+        privatleasing: model.privatleasing || extractFinancingPrice(model.financing_options?.privatleasing),
+        old_privatleasing: model.old_privatleasing,
+        company_leasing_price: model.company_leasing_price || extractFinancingPrice(model.financing_options?.company_leasing),
+        old_company_leasing_price: model.old_company_leasing_price,
+        loan_price: model.loan_price || extractFinancingPrice(model.financing_options?.loan),
+        old_loan_price: model.old_loan_price,
+        thumbnail: model.thumbnail || '',
+        bransle: model.bransle,
+        biltyp: model.biltyp,
+        vaxellada: model.vaxellada,
     };
 }
 
@@ -1598,9 +2112,13 @@ function convertToCampaignVehicleModel(model: VehicleModel): CampaignVehicleMode
         name: model.name,
         price: model.price || 0,
         old_price: model.old_price,
-        privatleasing: extractFinancingPrice(model.financing_options?.privatleasing),
-        company_leasing_price: extractFinancingPrice(model.financing_options?.company_leasing),
-        loan_price: extractFinancingPrice(model.financing_options?.loan),
+        // Use flat prices if available, otherwise extract from financing_options
+        privatleasing: model.privatleasing || extractFinancingPrice(model.financing_options?.privatleasing),
+        old_privatleasing: model.old_privatleasing,
+        company_leasing_price: model.company_leasing_price || extractFinancingPrice(model.financing_options?.company_leasing),
+        old_company_leasing_price: model.old_company_leasing_price,
+        loan_price: model.loan_price || extractFinancingPrice(model.financing_options?.loan),
+        old_loan_price: model.old_loan_price,
         thumbnail: model.thumbnail || ''
     };
 }
@@ -1630,7 +2148,9 @@ function convertVehicleToVehicleData(vehicle: Vehicle): VehicleData {
         description: truncateDescription(vehicle.description || ''),
         thumbnail: vehicle.thumbnail || '',
         vehicle_model: (vehicle.vehicle_model || []).map(convertToExternalVehicleModel),
-        free_text: vehicle.free_text || ''
+        free_text: vehicle.free_text || '',
+        source_url: vehicle.source_url,
+        pdf_source_url: vehicle.pdf_source_url
     };
 }
 
@@ -1643,7 +2163,8 @@ export async function processHtmlWithAI(
     sourceUrl: string,
     category: string = 'unknown',
     enableImageAnalysis: boolean = true,
-    enableFactChecking: boolean = false
+    enableFactChecking: boolean = false,
+    pdfExtractedText: string = '' // PDF data to include with each batch
 ): Promise<EnhancedProcessedResult> {
     const startTime = Date.now();
     let contentType: ContentType = 'cars';
@@ -1721,6 +2242,14 @@ export async function processHtmlWithAI(
 
         console.log(`Processing ${batchesToProcess.length} batches`);
 
+        // TEST MODE: Limit batches to speed up testing
+        const testMode = process.env.TEST_MODE === 'true';
+        const maxBatches = testMode ? 3 : batchesToProcess.length;
+        if (testMode && batchesToProcess.length > maxBatches) {
+            console.log(`🧪 TEST MODE: Limiting to ${maxBatches} batches (was ${batchesToProcess.length})`);
+            batchesToProcess = batchesToProcess.slice(0, maxBatches);
+        }
+
         if (batchesToProcess.length === 0) {
             console.log('No content batches to process');
             return {
@@ -1734,15 +2263,25 @@ export async function processHtmlWithAI(
             };
         }
 
-        // Process all batches
-        const results = await Promise.all(
-            batchesToProcess.map((batchHtml, index) => {
-                console.log(`Processing batch ${index + 1}/${batchesToProcess.length} (${batchHtml.length} chars)`);
-                return processHtmlBatch(batchHtml, sourceUrl, contentType, enableImageAnalysis);
-            })
-        );
+        // Process batches SEQUENTIALLY to avoid Claude rate limits (10k tokens/min)
+        // Using Promise.all causes all batches to hit the API simultaneously, triggering 429 errors
+        const batchDelayMs = 5000; // 5 seconds between batches to stay under rate limit
 
-        results.forEach((batchResult, index) => {
+        for (let index = 0; index < batchesToProcess.length; index++) {
+            // Include PDF data with each batch so variant/pricing info is available for all vehicles
+            const batchHtml = pdfExtractedText
+                ? `${batchesToProcess[index]}\n\n<!-- EXTRACTED PDF PRICELIST DATA - Use this for variant names, prices, and specifications -->\n${pdfExtractedText}`
+                : batchesToProcess[index];
+
+            // Add delay between batches (not before the first one)
+            if (index > 0) {
+                console.log(`⏳ Waiting ${batchDelayMs / 1000}s between batches to avoid rate limits...`);
+                await new Promise(resolve => setTimeout(resolve, batchDelayMs));
+            }
+
+            console.log(`Processing batch ${index + 1}/${batchesToProcess.length} (${batchHtml.length} chars${pdfExtractedText ? `, includes ${pdfExtractedText.length} chars of PDF data` : ''})`);
+            const batchResult = await processHtmlBatch(batchHtml, sourceUrl, contentType, enableImageAnalysis);
+
             console.log(`Batch ${index + 1} extracted ${batchResult.data.length} items`);
             if (batchResult.data.length > 1) {
                 console.log(`  ⚠️  Page ${index + 1} contained ${batchResult.data.length} ${contentType}:`);
@@ -1754,7 +2293,7 @@ export async function processHtmlWithAI(
             totalTokenUsage.prompt_tokens += batchResult.token_usage.prompt_tokens;
             totalTokenUsage.completion_tokens += batchResult.token_usage.completion_tokens;
             totalTokenUsage.total_tokens += batchResult.token_usage.total_tokens;
-        });
+        }
 
         // Apply deduplication
         console.log(`🔍 Pre-deduplication: ${allExtractedData.length} items`);
@@ -1763,7 +2302,23 @@ export async function processHtmlWithAI(
         console.log(`✅ Post-deduplication: ${allExtractedData.length} items`);
         console.log('✅ Post-deduplication items:', allExtractedData.map(item => item.title));
 
+        // TEST MODE: Limit vehicles for faster testing
+        if (testMode) {
+            const maxVehicles = parseInt(process.env.MAX_VEHICLES_PER_BATCH || '2', 10);
+            if (allExtractedData.length > maxVehicles) {
+                console.log(`🧪 TEST MODE: Limiting to ${maxVehicles} vehicles (was ${allExtractedData.length})`);
+                allExtractedData = allExtractedData.slice(0, maxVehicles);
+            }
+        }
+
         allExtractedData = resolveImageUrls(allExtractedData, sourceUrl);
+
+        // Validate and fix image-to-vehicle matching (for vehicles only)
+        if (contentType !== 'campaigns') {
+            // Extract all available images from the HTML for validation
+            const availableImages = extractImageUrls(htmlContent, sourceUrl);
+            allExtractedData = validateAndFixImageMatching(allExtractedData as Vehicle[], availableImages) as (Vehicle | Campaign)[];
+        }
 
         // Convert internal data to external format
         let convertedData: (CampaignData | VehicleData)[];
@@ -1963,9 +2518,10 @@ export async function processHtmlWithValidation(
     sourceUrl: string,
     category: string = 'unknown',
     enableImageAnalysis: boolean = true,
-    enableFactChecking: boolean = false
+    enableFactChecking: boolean = false,
+    pdfExtractedText: string = '' // PDF data to include with each batch
 ): Promise<EnhancedProcessedResult> {
-    const result = await processHtmlWithAI(htmlContent, sourceUrl, category, enableImageAnalysis, enableFactChecking);
+    const result = await processHtmlWithAI(htmlContent, sourceUrl, category, enableImageAnalysis, enableFactChecking, pdfExtractedText);
 
     if (!result.success || !result.data?.length) {
         return result;
@@ -2008,7 +2564,7 @@ export async function processHtmlWithValidation(
 
         // Log token usage for cost tracking
         const totalTokens = (result.token_usage?.total_tokens || 0) + (result.fact_check.token_usage?.total_tokens || 0);
-        console.log(`💰 Token Usage - OpenAI: ${result.token_usage?.total_tokens || 0}, Perplexity: ${result.fact_check.token_usage?.total_tokens || 0}, Total: ${totalTokens}`);
+        console.log(`💰 Token Usage - Claude: ${result.token_usage?.total_tokens || 0}, Perplexity: ${result.fact_check.token_usage?.total_tokens || 0}, Total: ${totalTokens}`);
     }
 
     console.log(`✅ Validated ${result.data.length} items`);
@@ -2026,7 +2582,8 @@ export async function processHtmlWithSmartFactCheck(
         carType?: string;
         description?: string;
         label?: string;
-    }
+    },
+    scraperPdfLinks?: { url: string; type: string; foundOnPage: string }[]  // PDF links from scraper
 ): Promise<EnhancedProcessedResult> {
     // Smart decision logic for enabling fact-checking
     const shouldFactCheck =
@@ -2051,18 +2608,127 @@ export async function processHtmlWithSmartFactCheck(
                         'priority brand') : 'not cost-effective';
 
     console.log(`🤖 Smart fact-checking: ${shouldFactCheck ? 'ENABLED' : 'DISABLED'} for ${sourceUrl} (reason: ${factCheckReason})`);
-    
+
     if (metadata) {
         console.log(`📊 Processing with metadata - Brand: ${metadata.brand || 'none'}, Car Type: ${metadata.carType || 'none'}, Label: ${metadata.label || 'none'}`);
     }
 
-    return processHtmlWithValidation(
+    // PDF Processing - Extract and process PDFs found in HTML
+    // Default to 10 PDFs to ensure all pricelists are processed (brochures are filtered out anyway)
+    const maxPdfsPerPage = parseInt(process.env.MAX_PDFS_PER_PAGE || '10', 10);
+    let pdfExtractedText = '';
+
+    // Track Google Document AI OCR costs
+    let googleOcrCosts = {
+        total_pages: 0,
+        total_cost_usd: 0,
+        pdfs_processed: 0
+    };
+
+    try {
+        // Use scraper-provided PDF links if available (more reliable)
+        // Otherwise fall back to extracting from HTML
+        let allPdfLinks: string[];
+
+        if (scraperPdfLinks && scraperPdfLinks.length > 0) {
+            // Use PDF links from scraper - these are already validated URLs found during scraping
+            allPdfLinks = scraperPdfLinks.map(pdf => pdf.url);
+            console.log(`📄 Using ${allPdfLinks.length} PDF links from scraper (preferred source):`);
+            scraperPdfLinks.forEach((pdf, i) => {
+                console.log(`   ${i + 1}. [${pdf.type}] ${pdf.url} (found on: ${pdf.foundOnPage})`);
+            });
+        } else {
+            // Fall back to extracting from HTML content
+            allPdfLinks = extractPDFLinksFromHTML(htmlContent, sourceUrl);
+            if (allPdfLinks.length > 0) {
+                console.log(`📄 Found ${allPdfLinks.length} PDF links in HTML (fallback extraction)`);
+            } else {
+                console.log(`📄 No PDF links found in HTML content from ${sourceUrl}`);
+            }
+        }
+
+        // Filter to only pricelists (skip brochures and other PDFs)
+        const pdfLinks = filterPricelistPDFs(allPdfLinks);
+
+        if (pdfLinks.length > 0) {
+            console.log(`📄 Processing ${pdfLinks.length} pricelist PDFs (up to ${maxPdfsPerPage})...`);
+
+            // Process only pricelist PDFs (limited by MAX_PDFS_PER_PAGE)
+            // Add delay between PDFs to avoid Claude rate limits (10k tokens/min on free tier)
+            const pdfDelayMs = 3000; // 3 seconds between PDFs to stay under rate limit
+
+            for (let i = 0; i < Math.min(pdfLinks.length, maxPdfsPerPage); i++) {
+                const pdfUrl = pdfLinks[i];
+                const pdfType = categorizePDF(pdfUrl);
+                console.log(`📄 Processing ${pdfType} PDF (${i + 1}/${Math.min(pdfLinks.length, maxPdfsPerPage)}): ${pdfUrl}`);
+
+                // Add delay between PDFs (not before the first one)
+                if (i > 0) {
+                    console.log(`⏳ Waiting ${pdfDelayMs}ms to avoid rate limits...`);
+                    await new Promise(resolve => setTimeout(resolve, pdfDelayMs));
+                }
+
+                try {
+                    const pdfResult = await extractPDFText(pdfUrl);
+                    if (pdfResult.success && pdfResult.text) {
+                        console.log(`✅ PDF extracted: ${pdfResult.text.length} chars via ${pdfResult.method}`);
+                        pdfExtractedText += `\n\n<!-- PDF CONTENT FROM: ${pdfUrl} (${pdfType}) -->\n${pdfResult.text}\n<!-- END PDF CONTENT -->`;
+
+                        // Track Google OCR costs if used
+                        if (pdfResult.method === 'google-document-ai' && pdfResult.ocrCostUsd) {
+                            googleOcrCosts.total_pages += pdfResult.pageCount || 1;
+                            googleOcrCosts.total_cost_usd += pdfResult.ocrCostUsd;
+                            googleOcrCosts.pdfs_processed += 1;
+                        }
+                    }
+                } catch (pdfError) {
+                    console.warn(`⚠️ Failed to process PDF ${pdfUrl}:`, pdfError);
+                }
+            }
+
+            if (pdfExtractedText) {
+                console.log(`📄 Total PDF text extracted: ${pdfExtractedText.length} characters`);
+            }
+
+            // Log Google OCR costs summary
+            if (googleOcrCosts.pdfs_processed > 0) {
+                console.log(`📊 Google Document AI OCR Summary:`);
+                console.log(`   - PDFs processed: ${googleOcrCosts.pdfs_processed}`);
+                console.log(`   - Total pages: ${googleOcrCosts.total_pages}`);
+                console.log(`   - Total cost: $${googleOcrCosts.total_cost_usd.toFixed(4)}`);
+            }
+        }
+    } catch (pdfError) {
+        console.warn('⚠️ PDF extraction failed:', pdfError);
+    }
+
+    // Pass PDF data separately so it can be included in each batch
+    const result = await processHtmlWithValidation(
         htmlContent,
         sourceUrl,
         category,
         enableImageAnalysis,
-        shouldFactCheck
+        shouldFactCheck,
+        pdfExtractedText // Pass PDF text to be included in each batch
     );
+
+    // Add Google OCR costs to the result
+    if (googleOcrCosts.pdfs_processed > 0) {
+        result.google_ocr_costs = googleOcrCosts;
+        // Add to total estimated cost
+        if (result.total_estimated_cost_usd !== undefined) {
+            result.total_estimated_cost_usd += googleOcrCosts.total_cost_usd;
+        }
+    }
+
+    // Store raw PDF text for debugging (truncated to 50KB to save space)
+    if (pdfExtractedText) {
+        (result as any).raw_pdf_text = pdfExtractedText.length > 50000
+            ? pdfExtractedText.substring(0, 50000) + '\n\n... [truncated]'
+            : pdfExtractedText;
+    }
+
+    return result;
 }
 
 // UTILITY FUNCTION FOR STANDALONE FACT-CHECKING

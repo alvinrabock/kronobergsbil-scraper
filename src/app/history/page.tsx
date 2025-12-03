@@ -18,6 +18,12 @@ interface ScrapeSession {
   success_items: number
   failed_items: number
   error_message: string | null
+  log_counts?: {
+    info: number
+    warn: number
+    error: number
+    debug: number
+  }
 }
 
 export default function HistoryPage() {
@@ -175,6 +181,20 @@ export default function HistoryPage() {
                             {session.total_items > 0 && (
                               <span>
                                 {session.success_items}/{session.total_items} items
+                              </span>
+                            )}
+                            {session.log_counts && (
+                              <span className="flex items-center gap-1">
+                                {session.log_counts.error > 0 && (
+                                  <span className="bg-red-100 text-red-700 px-1.5 py-0.5 rounded text-xs">
+                                    {session.log_counts.error} errors
+                                  </span>
+                                )}
+                                {session.log_counts.warn > 0 && (
+                                  <span className="bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded text-xs">
+                                    {session.log_counts.warn} warnings
+                                  </span>
+                                )}
                               </span>
                             )}
                           </div>

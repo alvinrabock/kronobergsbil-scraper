@@ -8,6 +8,13 @@ node_modules/
 .env.test.local
 .env.production.local
 
+# Google Cloud credentials (NEVER commit these!)
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+kronobergs-bil-*.json
+
 # Next.js
 .next/
 out/

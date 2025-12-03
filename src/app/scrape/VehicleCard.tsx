@@ -3,54 +3,53 @@
 import { useState } from 'react';
 import { JSX } from "react";
 
-// Type definitions
-interface TechnicalSpecifications {
-    engine?: {
-        type?: string;
-        fuel_type?: string;
-        power_hp?: number;
-    };
-    drivetrain?: {
-        transmission?: string;
-    };
-}
-
-interface FinancingOption {
-    monthly_price?: number;
-    monthly_payment?: number;
-    period_months?: number;
-    contract_length_months?: number;
-    annual_mileage?: number;
-    mileage_limit?: number;
-    benefit_value?: number;
-    interest_rate?: number;
-}
-
-interface FinancingOptions {
-    privatleasing?: FinancingOption[];
-    company_leasing?: FinancingOption[];
-    loan?: FinancingOption[];
-}
-
+// Type definitions - Updated to match database schema
 interface VehicleModel {
+    id?: string;
     name: string;
     variant?: string;
     price?: number;
-    technical_specifications?: TechnicalSpecifications;
-    financing_options?: FinancingOptions;
-}
-
-interface WarrantyInfo {
-    vehicle_warranty_years?: number;
+    old_price?: number;
+    privatleasing?: number;
+    old_privatleasing?: number;  // Campaign: original monthly price before discount
+    company_leasing_price?: number;
+    old_company_leasing_price?: number;  // Campaign: original monthly price before discount
+    loan_price?: number;
+    old_loan_price?: number;  // Campaign: original monthly price before discount
+    thumbnail_url?: string;
+    // Legacy nested format support
+    financing_options?: {
+        privatleasing?: Array<{ monthly_price?: number; old_monthly_price?: number; period_months?: number; annual_mileage?: number }>;
+        company_leasing?: Array<{ monthly_price?: number; old_monthly_price?: number; period_months?: number; benefit_value?: number }>;
+        loan?: Array<{ monthly_price?: number; old_monthly_price?: number; interest_rate?: number }>;
+    };
+    technical_specifications?: {
+        engine?: {
+            type?: string;
+            fuel_type?: string;
+            power_hp?: number;
+        };
+        drivetrain?: {
+            transmission?: string;
+        };
+    };
 }
 
 interface Vehicle {
+    id?: string;
     title: string;
     brand?: string;
     thumbnail?: string;
+    thumbnail_url?: string;
     description?: string;
-    warranty_info?: WarrantyInfo;
+    free_text?: string;
+    vehicle_type?: string;  // "cars" or "transport_cars"
+    body_type?: string;     // "suv", "sedan", "kombi", "halvkombi", "cab", "coupe", "minibuss", "pickup", "skåpbil"
     vehicle_model?: VehicleModel[];
+    vehicle_models?: VehicleModel[]; // Database format uses plural
+    warranty_info?: {
+        vehicle_warranty_years?: number;
+    };
 }
 
 interface VehicleCardProps {
@@ -58,33 +57,17 @@ interface VehicleCardProps {
     leasingMode?: 'all' | 'privat-leasing' | 'foretag-leasing' | 'purchase' | 'leasing';
 }
 
-interface FormattedFinancingOption {
-    type: string;
-    price: number | undefined;
-    period?: number;
-    mileage?: number;
-    benefit?: number;
-    rate?: number;
-    icon: string;
-}
-
 const VehicleCard: React.FC<VehicleCardProps> = ({
     vehicle,
     leasingMode = 'all'
 }) => {
-    const [expandedModels, setExpandedModels] = useState<Set<number>>(new Set());
+    const [isExpanded, setIsExpanded] = useState(false);
 
-    const toggleModel = (index: number) => {
-        const newExpanded = new Set(expandedModels);
-        if (newExpanded.has(index)) {
-            newExpanded.delete(index);
-        } else {
-            newExpanded.add(index);
-        }
-        setExpandedModels(newExpanded);
-    };
+    // Normalize vehicle_models (handle both singular and plural property names)
+    const vehicleModels = vehicle.vehicle_models || vehicle.vehicle_model || [];
+    const thumbnail = vehicle.thumbnail_url || vehicle.thumbnail;
 
-    const formatPrice = (amount: number | undefined) => {
+    const formatPrice = (amount: number | undefined | null) => {
         if (!amount || amount === 0) return 'Pris på förfrågan';
         return new Intl.NumberFormat('sv-SE', {
             style: 'currency',
@@ -94,488 +77,296 @@ const VehicleCard: React.FC<VehicleCardProps> = ({
         }).format(amount);
     };
 
-    const getFinancingDisplay = (financing: FinancingOptions | undefined): FormattedFinancingOption[] => {
-        const options: FormattedFinancingOption[] = [];
-
-        if (financing?.privatleasing?.length && financing.privatleasing.length > 0) {
-            const option = financing.privatleasing[0];
-            options.push({
-                type: 'Privatleasing',
-                price: option.monthly_price || option.monthly_payment,
-                period: option.period_months || option.contract_length_months,
-                mileage: option.annual_mileage || option.mileage_limit,
-                icon: '🚗'
-            });
-        }
-
-        if (financing?.company_leasing?.length && financing.company_leasing.length > 0) {
-            const option = financing.company_leasing[0];
-            options.push({
-                type: 'Företagsleasing',
-                price: option.monthly_price || option.monthly_payment,
-                period: option.period_months || option.contract_length_months,
-                mileage: option.annual_mileage || option.mileage_limit,
-                benefit: option.benefit_value,
-                icon: '🏢'
-            });
-        }
-
-        if (financing?.loan?.length && financing.loan.length > 0) {
-            const option = financing.loan[0];
-            options.push({
-                type: 'Billån',
-                price: option.monthly_price || option.monthly_payment,
-                period: option.period_months || option.contract_length_months,
-                rate: option.interest_rate,
-                icon: '🏦'
-            });
-        }
-
-        return options;
+    const formatMonthlyPrice = (amount: number | undefined | null) => {
+        if (!amount || amount === 0) return null;
+        return `${amount.toLocaleString('sv-SE')} kr/mån`;
     };
 
-    // Helper function to safely format prices
-    const formatFieldPrice = (price: number | null | undefined): string => {
-        if (price === null || price === undefined || isNaN(price)) {
-            return 'Pris på begäran';
+    // Get privatleasing price from model (handles both flat and nested format)
+    const getPrivatleasing = (model: VehicleModel): number | null => {
+        // Flat format from database
+        if (model.privatleasing && model.privatleasing > 0) {
+            return model.privatleasing;
         }
-        return price.toLocaleString();
-    };
-
-    // Helper function to format field display
-    const formatField = (field: string | string[] | undefined | null): string => {
-        if (!field) return '';
-        if (Array.isArray(field)) {
-            return field.filter(item => item && item.trim().length > 0).join(', ');
-        }
-        return typeof field === 'string' ? field : '';
-    };
-
-    // Get fuel type from vehicle data
-    const getFuelType = (): string | null => {
-        if (vehicle.vehicle_model && vehicle.vehicle_model.length > 0) {
-            const model = vehicle.vehicle_model[0];
-            if (model.technical_specifications?.engine?.fuel_type) {
-                return model.technical_specifications.engine.fuel_type;
-            }
+        // Nested format (legacy)
+        if (model.financing_options?.privatleasing?.[0]?.monthly_price) {
+            return model.financing_options.privatleasing[0].monthly_price;
         }
         return null;
     };
 
-    // Get fuel icon
-    const fuelType = getFuelType();
-    const fuelIcons: Record<string, JSX.Element> = {
-        'Bensin': (
-            <div className="w-7 h-7 flex items-center justify-center bg-blue-100 text-blue-600 rounded-full">
-                ⛽
-            </div>
-        ),
-        'Petrol': (
-            <div className="w-7 h-7 flex items-center justify-center bg-blue-100 text-blue-600 rounded-full">
-                ⛽
-            </div>
-        ),
-        'Diesel': (
-            <div className="w-7 h-7 flex items-center justify-center bg-yellow-100 text-yellow-600 rounded-full">
-                🚛
-            </div>
-        ),
-        'Electric': (
-            <div className="w-7 h-7 flex items-center justify-center bg-green-100 text-green-600 rounded-full">
-                ⚡
-            </div>
-        ),
-        'El': (
-            <div className="w-7 h-7 flex items-center justify-center bg-green-100 text-green-600 rounded-full">
-                ⚡
-            </div>
-        ),
-        'Hybrid': (
-            <div className="w-7 h-7 flex items-center justify-center bg-purple-100 text-purple-600 rounded-full">
-                🔋
-            </div>
-        ),
-        'Bensin/El': (
-            <div className="w-7 h-7 flex items-center justify-center bg-purple-100 text-purple-600 rounded-full">
-                🔋
-            </div>
-        ),
-        'Bensin-El': (
-            <div className="w-7 h-7 flex items-center justify-center bg-purple-100 text-purple-600 rounded-full">
-                🔋
-            </div>
-        ),
-        'Petrol/Electric': (
-            <div className="w-7 h-7 flex items-center justify-center bg-purple-100 text-purple-600 rounded-full">
-                🔋
-            </div>
-        ),
+    // Get company leasing price from model
+    const getCompanyLeasing = (model: VehicleModel): number | null => {
+        if (model.company_leasing_price && model.company_leasing_price > 0) {
+            return model.company_leasing_price;
+        }
+        if (model.financing_options?.company_leasing?.[0]?.monthly_price) {
+            return model.financing_options.company_leasing[0].monthly_price;
+        }
+        return null;
     };
 
-    // Get primary vehicle model for pricing
-    const primaryModel = vehicle.vehicle_model && vehicle.vehicle_model.length > 0
-        ? vehicle.vehicle_model[0]
-        : null;
+    // Get loan price from model
+    const getLoanPrice = (model: VehicleModel): number | null => {
+        if (model.loan_price && model.loan_price > 0) {
+            return model.loan_price;
+        }
+        if (model.financing_options?.loan?.[0]?.monthly_price) {
+            return model.financing_options.loan[0].monthly_price;
+        }
+        return null;
+    };
 
-    // Helper function to get the lowest private leasing price across all vehicle models
-    const getLowestPrivateLeasingPrice = (): number | null => {
-        if (!vehicle.vehicle_model || vehicle.vehicle_model.length === 0) return null;
-        
-        let lowestPrice: number | null = null;
-        
-        vehicle.vehicle_model.forEach(model => {
-            if (model.financing_options?.privatleasing && Array.isArray(model.financing_options.privatleasing)) {
-                model.financing_options.privatleasing.forEach(option => {
-                    const price = option.monthly_price || option.monthly_payment;
-                    if (price && price > 0 && (lowestPrice === null || price < lowestPrice)) {
-                        lowestPrice = price;
-                    }
-                });
+    // Get OLD (pre-discount) privatleasing price from model
+    const getOldPrivatleasing = (model: VehicleModel): number | null => {
+        if (model.old_privatleasing && model.old_privatleasing > 0) {
+            return model.old_privatleasing;
+        }
+        if (model.financing_options?.privatleasing?.[0]?.old_monthly_price) {
+            return model.financing_options.privatleasing[0].old_monthly_price;
+        }
+        return null;
+    };
+
+    // Get OLD (pre-discount) company leasing price from model
+    const getOldCompanyLeasing = (model: VehicleModel): number | null => {
+        if (model.old_company_leasing_price && model.old_company_leasing_price > 0) {
+            return model.old_company_leasing_price;
+        }
+        if (model.financing_options?.company_leasing?.[0]?.old_monthly_price) {
+            return model.financing_options.company_leasing[0].old_monthly_price;
+        }
+        return null;
+    };
+
+    // Get OLD (pre-discount) loan price from model
+    const getOldLoanPrice = (model: VehicleModel): number | null => {
+        if (model.old_loan_price && model.old_loan_price > 0) {
+            return model.old_loan_price;
+        }
+        if (model.financing_options?.loan?.[0]?.old_monthly_price) {
+            return model.financing_options.loan[0].old_monthly_price;
+        }
+        return null;
+    };
+
+    // Get lowest prices across all models
+    const getLowestPrivatleasing = (): number | null => {
+        let lowest: number | null = null;
+        vehicleModels.forEach(model => {
+            const price = getPrivatleasing(model);
+            if (price && (lowest === null || price < lowest)) {
+                lowest = price;
             }
         });
-        
-        return lowestPrice;
+        return lowest;
     };
 
-    // Helper function to get the lowest business leasing price across all vehicle models
-    const getLowestBusinessLeasingPrice = (): number | null => {
-        if (!vehicle.vehicle_model || vehicle.vehicle_model.length === 0) return null;
-        
-        let lowestPrice: number | null = null;
-        
-        vehicle.vehicle_model.forEach(model => {
-            if (model.financing_options?.company_leasing && Array.isArray(model.financing_options.company_leasing)) {
-                model.financing_options.company_leasing.forEach(option => {
-                    const price = option.monthly_price || option.monthly_payment;
-                    if (price && price > 0 && (lowestPrice === null || price < lowestPrice)) {
-                        lowestPrice = price;
-                    }
-                });
+    const getLowestCompanyLeasing = (): number | null => {
+        let lowest: number | null = null;
+        vehicleModels.forEach(model => {
+            const price = getCompanyLeasing(model);
+            if (price && (lowest === null || price < lowest)) {
+                lowest = price;
             }
         });
-        
-        return lowestPrice;
+        return lowest;
     };
 
-    // Get pricing across all models (lowest prices)
-    const privateLeasingPrice = getLowestPrivateLeasingPrice();
-    const businessLeasingPrice = getLowestBusinessLeasingPrice();
-    const purchasePrice = primaryModel?.price;
+    const getLowestPurchasePrice = (): number | null => {
+        let lowest: number | null = null;
+        vehicleModels.forEach(model => {
+            if (model.price && model.price > 0 && (lowest === null || model.price < lowest)) {
+                lowest = model.price;
+            }
+        });
+        return lowest;
+    };
 
-    // Debug logging
-    console.log('Debug pricing:', {
-        privateLeasingPrice,
-        businessLeasingPrice,
-        purchasePrice,
-        hasVehicleModel: !!vehicle.vehicle_model,
-        vehicleModelLength: vehicle.vehicle_model?.length,
-        firstModelFinancing: vehicle.vehicle_model?.[0]?.financing_options,
-        vehicleTitle: vehicle.title
-    });
+    const privateLeasingPrice = getLowestPrivatleasing();
+    const companyLeasingPrice = getLowestCompanyLeasing();
+    const purchasePrice = getLowestPurchasePrice();
 
-    // Check if we have any leasing options across all models
-    const hasPrivateLeasing = privateLeasingPrice !== null && privateLeasingPrice > 0;
-    const hasBusinessLeasing = businessLeasingPrice !== null && businessLeasingPrice > 0;
-    const hasPurchasePrice = primaryModel?.price && primaryModel.price > 0;
-
-    // Check leasing modes
-    const isPrivatLeasingMode = leasingMode === 'privat-leasing';
-    const isForetagLeasingMode = leasingMode === 'foretag-leasing';
+    const hasPrivateLeasing = privateLeasingPrice !== null;
+    const hasCompanyLeasing = companyLeasingPrice !== null;
+    const hasPurchasePrice = purchasePrice !== null;
 
     return (
-        <div className="w-full overflow-hidden bg-white rounded-lg shadow-sm border border-gray-100">
+        <div className="w-full overflow-hidden bg-white rounded-lg shadow-md border border-gray-200">
             {/* Image Section */}
-            <div className="relative aspect-[16/10] w-full overflow-hidden">
-                {vehicle.thumbnail && (
-                    <div className="relative w-full h-full">
-                        <img
-                            src={vehicle.thumbnail}
-                            alt={vehicle.title}
-                            className="w-full h-full object-cover"
-                            onError={(e) => {
-                                e.currentTarget.style.display = 'none';
-                            }}
-                        />
-                    </div>
-                )}
-            </div>
+            {thumbnail && (
+                <div className="relative aspect-[16/9] w-full overflow-hidden bg-gray-100">
+                    <img
+                        src={thumbnail}
+                        alt={vehicle.title}
+                        className="w-full h-full object-cover"
+                        onError={(e) => {
+                            e.currentTarget.style.display = 'none';
+                        }}
+                    />
+                </div>
+            )}
 
             {/* Header Section */}
-            <div className="px-6 pt-4 pb-4">
-                <div className="flex items-center justify-between">
-                    <h2 className="text-2xl font-semibold leading-tight text-gray-900">{vehicle.title}</h2>
-                    <div className="flex flex-row gap-2 items-center">
-                        {fuelType && fuelIcons[fuelType] && (
-                            <div className="flex gap-2">
-                                {fuelIcons[fuelType]}
-                            </div>
-                        )}
+            <div className="px-5 pt-4 pb-3">
+                <div className="flex items-start justify-between gap-3">
+                    <div>
+                        <h2 className="text-xl font-bold text-gray-900">{vehicle.title}</h2>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                            {vehicle.brand && (
+                                <span className="inline-block px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-sm font-medium">
+                                    {vehicle.brand}
+                                </span>
+                            )}
+                            {vehicle.body_type && (
+                                <span className="inline-block px-2 py-0.5 bg-purple-100 text-purple-800 rounded text-sm font-medium capitalize">
+                                    {vehicle.body_type}
+                                </span>
+                            )}
+                        </div>
                     </div>
-                </div>
-                {/* Brand badge */}
-                {vehicle.brand && (
-                    <div className="flex justify-start mt-2">
-                        <span className="px-3 py-1 bg-gray-100 text-gray-800 rounded-full text-sm font-medium">
-                            {vehicle.brand}
+                    {vehicle.vehicle_type && (
+                        <span className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs">
+                            {vehicle.vehicle_type === 'cars' ? 'Personbil' : 'Transportbil'}
                         </span>
-                    </div>
+                    )}
+                </div>
+
+                {/* Description */}
+                {vehicle.description && (
+                    <p className="mt-2 text-sm text-gray-600 line-clamp-2">
+                        {vehicle.description}
+                    </p>
                 )}
             </div>
 
-            {/* Content Section */}
-            <div className="px-6 space-y-4">
-                <div className="space-y-2">
-                    {/* Pricing Section */}
-                    {isPrivatLeasingMode ? (
-                        // PRIVATE LEASING MODE
-                        <div className="space-y-2">
-                            {hasPrivateLeasing && (
-                                <div className="p-4 rounded-xl bg-gradient-to-r from-slate-800/5 to-slate-900/5 border border-slate-700">
-                                    <div className="flex items-center justify-between">
-                                        <div>
-                                            <span className="text-sm text-black/60 font-medium">
-                                                Privatleasingpris
-                                            </span>
-                                            <div className="text-2xl font-bold text-black">
-                                                Från {formatFieldPrice(privateLeasingPrice)} SEK/mån
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-
-                            {hasBusinessLeasing && (
-                                <div className="text-left py-2">
-                                    <span className="text-sm text-gray-500">
-                                        Företagsleasing från {formatFieldPrice(businessLeasingPrice)} SEK/mån
-                                    </span>
-                                </div>
-                            )}
-
-                            {hasPurchasePrice && (
-                                <div className="text-left py-1">
-                                    <span className="text-sm text-gray-400">
-                                        Eller köp för {formatPrice(purchasePrice)}
-                                    </span>
-                                </div>
-                            )}
-                        </div>
-                    ) : isForetagLeasingMode ? (
-                        // BUSINESS LEASING MODE
-                        <div className="space-y-2">
-                            {hasBusinessLeasing && (
-                                <div className="p-4 rounded-xl bg-gradient-to-r from-slate-800/5 to-slate-900/5 border border-slate-700">
-                                    <div className="flex items-center justify-between">
-                                        <div>
-                                            <span className="text-sm text-black/60 font-medium">
-                                                Företagsleasingpris
-                                            </span>
-                                            <div className="text-2xl font-bold text-black">
-                                                Från {formatFieldPrice(businessLeasingPrice)} SEK/mån
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-
-                            {hasPrivateLeasing && (
-                                <div className="text-left py-2">
-                                    <span className="text-sm text-gray-500">
-                                        Privatleasing från {formatFieldPrice(privateLeasingPrice)} SEK/mån
-                                    </span>
-                                </div>
-                            )}
-
-                            {hasPurchasePrice && (
-                                <div className="text-left py-1">
-                                    <span className="text-sm text-gray-400">
-                                        Eller köp för {formatPrice(purchasePrice)}
-                                    </span>
-                                </div>
-                            )}
-                        </div>
-                    ) : (
-                        // NORMAL MODE - Show all prices
-                        <div className="space-y-4">
-                            {/* Purchase Price */}
-                            {hasPurchasePrice && (
-                                <div className="flex flex-col">
-                                    <span className="text-sm text-gray-600">Pris</span>
-                                    <span className="text-lg font-medium">Från {formatPrice(purchasePrice)}</span>
-                                </div>
-                            )}
-
-                            {/* Leasing Prices Section */}
-                            {(hasPrivateLeasing || hasBusinessLeasing) && (
-                                <div className="border-t pt-4">
-                                    <div className="flex flex-row flex-wrap gap-x-8 gap-y-4 items-baseline">
-                                        {/* Private Leasing */}
-                                        {hasPrivateLeasing && (
-                                            <div className="flex flex-col">
-                                                <span className="text-sm text-gray-600">Privatleasingpris</span>
-                                                <span className="text-lg font-medium">Från {formatFieldPrice(privateLeasingPrice)} SEK/mån</span>
-                                            </div>
-                                        )}
-
-                                        {/* Business Leasing */}
-                                        {hasBusinessLeasing && (
-                                            <div className="flex flex-col">
-                                                <span className="text-sm text-gray-600">Företagsleasingpris</span>
-                                                <span className="text-lg font-medium">Från {formatFieldPrice(businessLeasingPrice)} SEK/mån</span>
-                                            </div>
-                                        )}
-                                    </div>
-                                </div>
-                            )}
-
-                            {/* Show "Pris på begäran" if no pricing is available */}
-                            {!hasPurchasePrice && !hasPrivateLeasing && !hasBusinessLeasing && (
-                                <div className="flex flex-col">
-                                    <span className="text-sm text-gray-600">Pris</span>
-                                    <span className="text-lg font-medium">Pris på begäran</span>
-                                </div>
-                            )}
+            {/* Pricing Summary Section */}
+            <div className="px-5 py-3 bg-gray-50 border-t border-b border-gray-100">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {hasPurchasePrice && (
+                        <div className="text-center p-2 bg-white rounded border">
+                            <div className="text-xs text-gray-500 mb-1">Pris från</div>
+                            <div className="text-lg font-bold text-gray-900">{formatPrice(purchasePrice)}</div>
                         </div>
                     )}
-
-                    {/* Vehicle Details */}
-                    <div className="flex flex-row flex-wrap gap-x-8 gap-y-4 items-baseline pt-4 border-t">
-                        {/* Engine Type */}
-                        {primaryModel?.technical_specifications?.engine?.type && (
-                            <div className="flex flex-col">
-                                <span className="text-sm text-gray-600">Motor</span>
-                                <span className="text-base">
-                                    {primaryModel.technical_specifications.engine.type}
-                                </span>
-                            </div>
-                        )}
-
-                        {/* Fuel Type */}
-                        {fuelType && (
-                            <div className="flex flex-col">
-                                <span className="text-sm text-gray-600">Bränsle</span>
-                                <span className="text-base">
-                                    {fuelType}
-                                </span>
-                            </div>
-                        )}
-
-                        {/* Transmission */}
-                        {primaryModel?.technical_specifications?.drivetrain?.transmission && (
-                            <div className="flex flex-col">
-                                <span className="text-sm text-gray-600">Växellåda</span>
-                                <span className="text-base">
-                                    {primaryModel.technical_specifications.drivetrain.transmission}
-                                </span>
-                            </div>
-                        )}
-
-                        {/* Power */}
-                        {primaryModel?.technical_specifications?.engine?.power_hp && (
-                            <div className="flex flex-col">
-                                <span className="text-sm text-gray-600">Effekt</span>
-                                <span className="text-base">
-                                    {primaryModel.technical_specifications.engine.power_hp} hk
-                                </span>
-                            </div>
-                        )}
-                    </div>
+                    {hasPrivateLeasing && (
+                        <div className="text-center p-2 bg-white rounded border">
+                            <div className="text-xs text-gray-500 mb-1">Privatleasing</div>
+                            <div className="text-lg font-bold text-green-600">{formatMonthlyPrice(privateLeasingPrice)}</div>
+                        </div>
+                    )}
+                    {hasCompanyLeasing && (
+                        <div className="text-center p-2 bg-white rounded border">
+                            <div className="text-xs text-gray-500 mb-1">Företagsleasing</div>
+                            <div className="text-lg font-bold text-blue-600">{formatMonthlyPrice(companyLeasingPrice)}</div>
+                        </div>
+                    )}
+                    {!hasPurchasePrice && !hasPrivateLeasing && !hasCompanyLeasing && (
+                        <div className="col-span-full text-center p-2 bg-white rounded border">
+                            <div className="text-gray-500">Pris på förfrågan</div>
+                        </div>
+                    )}
                 </div>
+            </div>
 
-                {/* Expandable Vehicle Models */}
-                {vehicle.vehicle_model && vehicle.vehicle_model.length > 1 && (
-                    <div className="border-t pt-4">
-                        <button
-                            onClick={() => toggleModel(0)}
-                            className="flex items-center justify-between w-full text-left hover:bg-gray-50 p-2 rounded transition-colors"
+            {/* Vehicle Models Section */}
+            {vehicleModels.length > 0 && (
+                <div className="px-5 py-3">
+                    <button
+                        onClick={() => setIsExpanded(!isExpanded)}
+                        className="flex items-center justify-between w-full text-left hover:bg-gray-50 p-2 -mx-2 rounded transition-colors"
+                    >
+                        <span className="text-sm font-semibold text-gray-900">
+                            {vehicleModels.length} {vehicleModels.length === 1 ? 'variant' : 'varianter'}
+                        </span>
+                        <svg
+                            className={`w-5 h-5 text-gray-400 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
                         >
-                            <span className="text-sm font-medium text-gray-900">
-                                Visa alla modeller ({vehicle.vehicle_model.length})
-                            </span>
-                            <svg
-                                className={`w-5 h-5 transition-transform ${expandedModels.has(0) ? 'rotate-180' : ''}`}
-                                fill="none"
-                                stroke="currentColor"
-                                viewBox="0 0 24 24"
-                            >
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                            </svg>
-                        </button>
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                    </button>
 
-                        {expandedModels.has(0) && (
-                            <div className="mt-4 space-y-3">
-                                {vehicle.vehicle_model.map((model: VehicleModel, idx: number) => {
-                                    const financingOptions = getFinancingDisplay(model.financing_options);
+                    {isExpanded && (
+                        <div className="mt-3 space-y-2">
+                            {vehicleModels.map((model, idx) => {
+                                const modelPrivatleasing = getPrivatleasing(model);
+                                const modelCompanyLeasing = getCompanyLeasing(model);
+                                const modelLoanPrice = getLoanPrice(model);
+                                const modelOldPrivatleasing = getOldPrivatleasing(model);
+                                const modelOldCompanyLeasing = getOldCompanyLeasing(model);
+                                const modelOldLoanPrice = getOldLoanPrice(model);
 
-                                    return (
-                                        <div key={idx} className="p-3 border border-gray-200 rounded-lg bg-gray-50">
-                                            <div className="flex items-start justify-between mb-2">
-                                                <div>
-                                                    <h5 className="font-medium text-gray-900">{model.name}</h5>
-                                                    {model.variant && (
-                                                        <p className="text-sm text-gray-600">{model.variant}</p>
-                                                    )}
-                                                </div>
-                                                {model.price && model.price > 0 && (
-                                                    <div className="text-right">
-                                                        <div className="font-bold text-green-600">
-                                                            {formatPrice(model.price)}
-                                                        </div>
-                                                    </div>
+                                return (
+                                    <div key={model.id || idx} className="p-3 border border-gray-200 rounded-lg bg-white">
+                                        <div className="flex items-start justify-between mb-2">
+                                            <div className="flex-1">
+                                                <h4 className="font-semibold text-gray-900">{model.name}</h4>
+                                                {model.thumbnail_url && (
+                                                    <img
+                                                        src={model.thumbnail_url}
+                                                        alt={model.name}
+                                                        className="mt-2 w-20 h-12 object-cover rounded"
+                                                    />
                                                 )}
                                             </div>
-
-                                            {/* Financing Options */}
-                                            {financingOptions.length > 0 && (
-                                                <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3 mt-3">
-                                                    {financingOptions.map((option, optIdx) => (
-                                                        <div key={optIdx} className="p-2 border border-gray-200 rounded bg-white">
-                                                            <div className="flex items-center space-x-2 mb-1">
-                                                                <span>{option.icon}</span>
-                                                                <span className="font-medium text-xs">{option.type}</span>
-                                                            </div>
-                                                            <div className="text-sm font-bold text-gray-900">
-                                                                {typeof option.price === 'number' ? formatFieldPrice(option.price) : 'Pris på begäran'} SEK/mån
-                                                            </div>
-                                                            {option.period && (
-                                                                <div className="text-xs text-gray-600">
-                                                                    {option.period} månader
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    ))}
+                                            {model.price && model.price > 0 && (
+                                                <div className="text-right">
+                                                    <div className="text-xs text-gray-500">Pris</div>
+                                                    <div className="font-bold text-gray-900">{formatPrice(model.price)}</div>
+                                                    {model.old_price && model.old_price > 0 && model.old_price !== model.price && (
+                                                        <div className="text-xs text-gray-400 line-through">{formatPrice(model.old_price)}</div>
+                                                    )}
                                                 </div>
                                             )}
                                         </div>
-                                    );
-                                })}
-                            </div>
-                        )}
-                    </div>
-                )}
-            </div>
 
-            {/* Footer Section */}
-            <div className="px-6 py-4 border-t border-gray-100 bg-gray-50/50">
-                <div className="flex flex-row items-center justify-between w-full">
-                    {/* Description */}
-                    {vehicle.description && (
-                        <div className="flex flex-col items-start">
-                            <span className="text-sm text-gray-600">Beskrivning</span>
-                            <p className="text-sm text-gray-700">{vehicle.description}</p>
-                        </div>
-                    )}
-
-                    {/* Warranty Info */}
-                    {vehicle.warranty_info?.vehicle_warranty_years && (
-                        <div className="flex items-start gap-1">
-                            <span className="text-sm text-gray-600">
-                                Garanti {vehicle.warranty_info.vehicle_warranty_years} år
-                            </span>
+                                        {/* Financing Options */}
+                                        <div className="grid grid-cols-3 gap-2 mt-2">
+                                            {modelPrivatleasing && (
+                                                <div className="p-2 bg-green-50 rounded text-center">
+                                                    <div className="text-xs text-green-700">Privatleasing</div>
+                                                    {modelOldPrivatleasing && modelOldPrivatleasing !== modelPrivatleasing && (
+                                                        <div className="text-xs text-green-500 line-through">{formatMonthlyPrice(modelOldPrivatleasing)}</div>
+                                                    )}
+                                                    <div className="text-sm font-bold text-green-800">{formatMonthlyPrice(modelPrivatleasing)}</div>
+                                                </div>
+                                            )}
+                                            {modelCompanyLeasing && (
+                                                <div className="p-2 bg-blue-50 rounded text-center">
+                                                    <div className="text-xs text-blue-700">Företag</div>
+                                                    {modelOldCompanyLeasing && modelOldCompanyLeasing !== modelCompanyLeasing && (
+                                                        <div className="text-xs text-blue-500 line-through">{formatMonthlyPrice(modelOldCompanyLeasing)}</div>
+                                                    )}
+                                                    <div className="text-sm font-bold text-blue-800">{formatMonthlyPrice(modelCompanyLeasing)}</div>
+                                                </div>
+                                            )}
+                                            {modelLoanPrice && (
+                                                <div className="p-2 bg-purple-50 rounded text-center">
+                                                    <div className="text-xs text-purple-700">Lån</div>
+                                                    {modelOldLoanPrice && modelOldLoanPrice !== modelLoanPrice && (
+                                                        <div className="text-xs text-purple-500 line-through">{formatMonthlyPrice(modelOldLoanPrice)}</div>
+                                                    )}
+                                                    <div className="text-sm font-bold text-purple-800">{formatMonthlyPrice(modelLoanPrice)}</div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
                         </div>
                     )}
                 </div>
-            </div>
+            )}
+
+            {/* Free Text / Additional Info */}
+            {vehicle.free_text && (
+                <div className="px-5 py-3 border-t border-gray-100 bg-gray-50">
+                    <p className="text-xs text-gray-500">{vehicle.free_text}</p>
+                </div>
+            )}
         </div>
     );
 };

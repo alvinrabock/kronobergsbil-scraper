@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { scrapeWebsite } from '@/lib/scraper'
+import { scrapeWebsite, formatScrapedContent } from '@/lib/scraper'
 import { processHtmlWithSmartFactCheck } from '@/lib/ai-processor'
 
 export async function POST(request: NextRequest) {
@@ -26,12 +26,19 @@ export async function POST(request: NextRequest) {
 
     console.log(`🧠 [SIMPLE] Processing with AI...`)
     const startTime = Date.now()
-    
+
+    // Format content to include linked pages (which may contain PDF links)
+    const formattedContent = await formatScrapedContent(scrapeResult)
+    console.log(`📄 [SIMPLE] Formatted content includes ${scrapeResult.linkedContent?.length || 0} linked pages`)
+
     // Process with AI
     const aiResult = await processHtmlWithSmartFactCheck(
-      scrapeResult.cleanedHtml,
+      formattedContent,
       scrapeResult.url,
-      category || 'auto-detect'
+      category || 'auto-detect',
+      true, // enableImageAnalysis
+      undefined, // metadata
+      scrapeResult.pdfLinks // Pass PDF links from scraper
     )
     
     const processingTime = Date.now() - startTime

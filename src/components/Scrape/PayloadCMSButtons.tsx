@@ -389,7 +389,7 @@ export function PayloadCMSButtons({ aiResults, disabled = false }: PayloadCMSBut
       <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-lg p-6">
         <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
           <span className="mr-2">🚀</span>
-          Skapa/Uppdatera i Payload CMS
+          Skapa/Uppdatera i CMS
         </h3>
 
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">

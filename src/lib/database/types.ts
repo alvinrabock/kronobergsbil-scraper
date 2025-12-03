@@ -168,6 +168,8 @@ export interface Database {
           api_calls: any | null
           pdf_processing: any | null
           debug_info: any | null
+          google_ocr_costs: any | null
+          raw_pdf_text: string | null
         }
         Insert: {
           id?: string
@@ -188,6 +190,8 @@ export interface Database {
           api_calls?: any | null
           pdf_processing?: any | null
           debug_info?: any | null
+          google_ocr_costs?: any | null
+          raw_pdf_text?: string | null
         }
         Update: {
           id?: string
@@ -208,6 +212,8 @@ export interface Database {
           api_calls?: any | null
           pdf_processing?: any | null
           debug_info?: any | null
+          google_ocr_costs?: any | null
+          raw_pdf_text?: string | null
         }
       }
       campaigns: {
@@ -350,6 +356,10 @@ export interface Database {
           company_leasing_price: number | null
           loan_price: number | null
           thumbnail_url: string | null
+          bransle: string | null
+          biltyp: string | null
+          vaxellada: string | null
+          utrustning: string[] | null
           created_at: string
         }
         Insert: {
@@ -362,6 +372,10 @@ export interface Database {
           company_leasing_price?: number | null
           loan_price?: number | null
           thumbnail_url?: string | null
+          bransle?: string | null
+          biltyp?: string | null
+          vaxellada?: string | null
+          utrustning?: string[] | null
           created_at?: string
         }
         Update: {
@@ -374,6 +388,10 @@ export interface Database {
           company_leasing_price?: number | null
           loan_price?: number | null
           thumbnail_url?: string | null
+          bransle?: string | null
+          biltyp?: string | null
+          vaxellada?: string | null
+          utrustning?: string[] | null
           created_at?: string
         }
       }

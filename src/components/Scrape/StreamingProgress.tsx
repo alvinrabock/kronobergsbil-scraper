@@ -58,8 +58,16 @@ export function StreamingProgress({ scrapingParams, onComplete, onError }: Strea
   const [isComplete, setIsComplete] = useState(false);
   const [hasError, setHasError] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const hasStartedRef = useRef(false); // Prevent double-execution in React Strict Mode
 
   useEffect(() => {
+    // Prevent duplicate requests (React Strict Mode runs effects twice in dev)
+    if (hasStartedRef.current) {
+      console.log('🔄 Scrape already started, skipping duplicate request');
+      return;
+    }
+    hasStartedRef.current = true;
+
     const startStreaming = async () => {
       try {
         console.log('🔄 Starting streaming scrape...');

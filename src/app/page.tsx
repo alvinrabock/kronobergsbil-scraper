@@ -78,7 +78,7 @@ export default function Home() {
             <div className="text-2xl mb-3">🧠</div>
             <h3 className="text-lg font-semibold mb-2">AI Processing</h3>
             <p className="text-gray-600">
-              OpenAI-powered data extraction and structuring for campaigns, vehicles, and pricing information.
+              Claude AI-powered data extraction and structuring for campaigns, vehicles, and pricing information.
             </p>
           </div>
           

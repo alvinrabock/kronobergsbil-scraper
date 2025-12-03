@@ -42,9 +42,13 @@ export async function GET(
       return NextResponse.json({ error: 'Session not found' }, { status: 404 })
     }
 
+    // Also fetch logs for this session
+    const logs = await scrapeService.getSessionLogs(sessionId)
+
     return NextResponse.json({
       success: true,
-      ...sessionDetails
+      ...sessionDetails,
+      logs
     })
 
   } catch (error) {
