@@ -9,6 +9,7 @@ interface UrlData {
   category: string;
   contentType: string;
   label?: string;
+  brand?: string;
 }
 
 interface CategorizedResult extends ScrapeResult {

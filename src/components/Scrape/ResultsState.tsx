@@ -312,10 +312,11 @@ export function ResultsState({
     };
 
 
-    // Helper function to copy AI results as JSON
+    // Helper function to copy AI results as JSON (new schema with variants)
     const handleCopyAiJson = async (): Promise<void> => {
         try {
             const successfulAiResults = getSuccessfulAiResults();
+            // Always use the converted data (with new schema - variants instead of vehicle_models)
             const jsonData = JSON.stringify({
                 campaigns: successfulAiResults.flatMap(r => r.campaigns || []),
                 cars: successfulAiResults.flatMap(r => r.cars || []),

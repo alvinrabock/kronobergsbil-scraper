@@ -427,63 +427,169 @@ export async function scrapeWebsite(url: string, fetchLinks = true): Promise<Scr
 
     console.log(`Page info extracted: ${pageInfo.title}`);
 
-    // Find best thumbnail with improved selection
+    // Find best thumbnail with improved selection - prefer HIGH QUALITY images
     const bestThumbnail: string | undefined = await page.evaluate((baseUrl: string) => {
       try {
-        const images: Array<{src: string, score: number}> = [];
-        
+        const images: Array<{src: string, score: number, width: number}> = [];
+
+        // Helper to resolve relative URLs
+        const resolveUrl = (url: string): string => {
+          if (!url) return '';
+          if (url.startsWith('/')) {
+            try {
+              const urlBase = new URL(baseUrl);
+              return `${urlBase.protocol}//${urlBase.host}${url}`;
+            } catch (e) {
+              return url;
+            }
+          }
+          return url;
+        };
+
+        // Helper to extract best URL from srcset (highest resolution)
+        const getBestFromSrcset = (srcset: string | null): { url: string, width: number } | null => {
+          if (!srcset) return null;
+
+          const entries = srcset.split(',').map(entry => {
+            const parts = entry.trim().split(/\s+/);
+            let url = parts[0];
+            let width = 0;
+
+            // Handle Next.js image URLs - extract real URL and width
+            if (url.includes('/_next/image/') && url.includes('url=')) {
+              const urlMatch = url.match(/url=([^&]+)/);
+              const widthMatch = url.match(/[?&]w=(\d+)/);
+              if (urlMatch) {
+                url = decodeURIComponent(urlMatch[1]);
+              }
+              if (widthMatch) {
+                width = parseInt(widthMatch[1], 10);
+              }
+            }
+
+            // Parse width descriptor (e.g., "800w")
+            if (parts[1] && parts[1].endsWith('w')) {
+              width = parseInt(parts[1].replace('w', ''), 10) || width;
+            }
+
+            return { url: resolveUrl(url), width };
+          });
+
+          // Sort by width descending and return the largest
+          entries.sort((a, b) => b.width - a.width);
+          return entries.length > 0 && entries[0].width > 0 ? entries[0] : null;
+        };
+
         document.querySelectorAll('img').forEach(img => {
           let src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || '';
-          
+          let width = 0;
+
           // Skip placeholder/broken images
-          if (!src || 
-              src.includes('data:image/gif;base64') || 
-              src.includes('placeholder') || 
+          if (!src ||
+              src.includes('data:image/gif;base64') ||
+              src.includes('placeholder') ||
+              src.includes('spinner') ||
+              src.includes('loading') ||
               src.length < 10) {
             return;
           }
-          
-          // Resolve relative URLs
-          if (src.startsWith('/')) {
-            try {
-              const urlBase = new URL(baseUrl);
-              src = `${urlBase.protocol}//${urlBase.host}${src}`;
-            } catch (e) {
-              return;
+
+          // Try to get highest resolution from srcset first
+          const srcset = img.getAttribute('srcset');
+          const bestSrcset = getBestFromSrcset(srcset);
+          if (bestSrcset && bestSrcset.width >= 800) {
+            src = bestSrcset.url;
+            width = bestSrcset.width;
+          } else {
+            // Handle Next.js image URLs - try to get larger version
+            if (src.includes('/_next/image/') && src.includes('url=')) {
+              const urlMatch = src.match(/url=([^&]+)/);
+              if (urlMatch) {
+                src = decodeURIComponent(urlMatch[1]);
+              }
             }
+
+            // Try to extract width from URL or img attributes
+            const widthMatch = src.match(/[?&]w=(\d+)/);
+            if (widthMatch) {
+              width = parseInt(widthMatch[1], 10);
+            }
+            width = width || img.naturalWidth || parseInt(img.getAttribute('width') || '0', 10);
           }
-          
+
+          // Resolve relative URLs
+          src = resolveUrl(src);
+
+          // Skip if we couldn't resolve the URL
+          if (!src || !src.startsWith('http')) return;
+
           // Score images based on various factors
           let score = 0;
-          
-          // Prefer images with car/vehicle related keywords
-          if (src.toLowerCase().includes('car') || 
-              src.toLowerCase().includes('vehicle') || 
-              src.toLowerCase().includes('auto') ||
-              src.toLowerCase().includes('bil')) {
-            score += 10;
+
+          // STRONGLY prefer larger images (width-based scoring)
+          if (width >= 1920) score += 50;
+          else if (width >= 1200) score += 40;
+          else if (width >= 800) score += 30;
+          else if (width >= 600) score += 20;
+          else if (width >= 400) score += 10;
+          else if (width > 0 && width < 200) score -= 20; // Penalize tiny images
+
+          // Prefer images with car/vehicle related keywords in URL
+          const srcLower = src.toLowerCase();
+          if (srcLower.includes('car') ||
+              srcLower.includes('vehicle') ||
+              srcLower.includes('auto') ||
+              srcLower.includes('bil') ||
+              srcLower.includes('model') ||
+              srcLower.includes('exterior')) {
+            score += 15;
           }
-          
-          // Prefer larger images
-          if (src.includes('_large') || src.includes('_big') || src.includes('1920x') || src.includes('1200x')) {
+
+          // Prefer URL patterns indicating high quality
+          if (srcLower.includes('_large') || srcLower.includes('_big') ||
+              srcLower.includes('1920') || srcLower.includes('1200') ||
+              srcLower.includes('hero') || srcLower.includes('banner') ||
+              srcLower.includes('original') || srcLower.includes('full')) {
+            score += 20;
+          }
+
+          // Penalize URL patterns indicating low quality
+          if (srcLower.includes('thumb') || srcLower.includes('small') ||
+              srcLower.includes('icon') || srcLower.includes('logo') ||
+              srcLower.includes('avatar') || srcLower.includes('_xs') ||
+              srcLower.includes('_sm') || srcLower.includes('tiny')) {
+            score -= 30;
+          }
+
+          // Prefer JPG/PNG/WEBP
+          if (srcLower.match(/\.(jpg|jpeg|png|webp)(\?|$)/)) {
             score += 5;
           }
-          
-          // Prefer JPG/PNG/WEBP
-          if (src.toLowerCase().match(/\.(jpg|jpeg|png|webp)$/)) {
-            score += 2;
+
+          // Prefer images in main content areas (hero sections, main content)
+          if (img.closest('.hero, .banner, .main-image, .featured, [class*="hero"], [class*="banner"]')) {
+            score += 25;
+          } else if (img.closest('main, article, .content, section')) {
+            score += 10;
           }
-          
-          // Prefer images in main content areas
-          if (img.closest('main, article, .content, section')) {
-            score += 3;
+
+          // Penalize images in footer, nav, sidebar
+          if (img.closest('footer, nav, aside, .sidebar, .footer, .nav')) {
+            score -= 20;
           }
-          
-          images.push({ src, score });
+
+          images.push({ src, score, width });
         });
-        
-        // Sort by score and return the best one
+
+        // Sort by score descending
         images.sort((a, b) => b.score - a.score);
+
+        console.log('Top 5 thumbnail candidates:', images.slice(0, 5).map(i => ({
+          url: i.src.substring(0, 80),
+          score: i.score,
+          width: i.width
+        })));
+
         return images.length > 0 ? images[0].src : undefined;
       } catch (e) {
         console.log('Error finding thumbnail:', e);

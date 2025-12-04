@@ -5,7 +5,9 @@
  * and updating prices from daily scraping.
  */
 
-import { createClient } from '@supabase/supabase-js';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { createServerClient } from '@supabase/ssr';
+import { cookies } from 'next/headers';
 import type {
   PDFVehicleData,
   MasterBrand,
@@ -30,15 +32,38 @@ import type {
 // SUPABASE CLIENT
 // =============================================================================
 
-function getSupabaseClient() {
+/**
+ * Get Supabase client for server-side operations
+ * Uses the same pattern as the rest of the app for proper authentication
+ */
+async function getSupabaseClient(): Promise<SupabaseClient> {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
   if (!supabaseUrl || !supabaseKey) {
     throw new Error('Missing Supabase credentials');
   }
 
-  return createClient(supabaseUrl, supabaseKey);
+  // Try to use the server client with cookies for proper auth context
+  try {
+    const cookieStore = await cookies();
+    return createServerClient(supabaseUrl, supabaseKey, {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
+    });
+  } catch {
+    // Fallback to simple client if cookies not available (e.g., in scripts)
+    console.log('Using simple Supabase client (no cookie context)');
+    return createClient(supabaseUrl, supabaseKey);
+  }
 }
 
 // =============================================================================
@@ -49,7 +74,7 @@ function getSupabaseClient() {
  * Get or create a brand by name
  */
 export async function getOrCreateBrand(name: string): Promise<MasterBrand> {
-  const client = getSupabaseClient();
+  const client = await getSupabaseClient();
 
   // Try to find existing brand
   const { data: existing } = await client
@@ -88,7 +113,7 @@ export async function getOrCreateVehicle(
   name: string,
   modelYear?: number
 ): Promise<MasterVehicle> {
-  const client = getSupabaseClient();
+  const client = await getSupabaseClient();
 
   // Generate slug
   const slug = name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
@@ -148,7 +173,7 @@ export interface ImportResult {
  * Import complete vehicle data from PDF extraction
  */
 export async function importPDFVehicleData(data: PDFVehicleData): Promise<ImportResult> {
-  const client = getSupabaseClient();
+  const client = await getSupabaseClient();
   const errors: string[] = [];
   let variantsCreated = 0;
   let pricesUpdated = 0;
@@ -612,7 +637,7 @@ export async function updatePricesFromScrape(
   motorType: string,
   prices: PriceUpdateData
 ): Promise<{ success: boolean; updated: boolean; error?: string }> {
-  const client = getSupabaseClient();
+  const client = await getSupabaseClient();
 
   try {
     // Find the brand
@@ -670,6 +695,7 @@ export async function updatePricesFromScrape(
 
 /**
  * Get complete vehicle catalog with current prices
+ * Uses direct table queries instead of a view for better compatibility
  */
 export async function getVehicleCatalog(filters?: {
   brand?: string;
@@ -677,37 +703,171 @@ export async function getVehicleCatalog(filters?: {
   motorType?: string;
   isCampaign?: boolean;
 }) {
-  const client = getSupabaseClient();
+  const client = await getSupabaseClient();
 
-  let query = client.from('vehicle_catalog').select('*');
+  try {
+    // First, get all variants with their vehicle and brand info
+    let variantsQuery = client
+      .from('master_variants')
+      .select(`
+        id,
+        name,
+        trim_level,
+        motor_type,
+        motor_key,
+        drivlina,
+        vaxellada,
+        master_vehicles!inner (
+          id,
+          name,
+          slug,
+          model_year,
+          vehicle_type,
+          thumbnail_url,
+          master_brands!inner (
+            id,
+            name
+          )
+        )
+      `);
 
-  if (filters?.brand) {
-    query = query.eq('brand', filters.brand);
-  }
-  if (filters?.vehicleType) {
-    query = query.eq('vehicle_type', filters.vehicleType);
-  }
-  if (filters?.motorType) {
-    query = query.eq('motor_type', filters.motorType);
-  }
-  if (filters?.isCampaign !== undefined) {
-    query = query.eq('is_campaign', filters.isCampaign);
-  }
+    // Apply motor type filter at variant level
+    if (filters?.motorType) {
+      variantsQuery = variantsQuery.eq('motor_type', filters.motorType);
+    }
 
-  const { data, error } = await query;
+    const { data: variants, error: variantsError } = await variantsQuery;
 
-  if (error) {
-    throw new Error(`Failed to fetch catalog: ${error.message}`);
+    if (variantsError) {
+      console.error('Variants query error:', variantsError);
+      throw new Error(`Failed to fetch variants: ${variantsError.message}`);
+    }
+
+    if (!variants || variants.length === 0) {
+      return [];
+    }
+
+    // Get current prices for all variants
+    const variantIds = variants.map((v) => v.id);
+    const { data: prices, error: pricesError } = await client
+      .from('variant_prices')
+      .select('*')
+      .in('variant_id', variantIds)
+      .is('valid_until', null);
+
+    if (pricesError) {
+      console.error('Prices query error:', pricesError);
+      // Continue without prices rather than failing completely
+    }
+
+    // Get motor specs for enrichment
+    const vehicleIds = [...new Set(variants.map((v) => (v.master_vehicles as { id: string }).id))];
+    const { data: motorSpecs } = await client
+      .from('master_motor_specs')
+      .select('*')
+      .in('vehicle_id', vehicleIds);
+
+    const { data: dimensions } = await client
+      .from('master_dimensions')
+      .select('*')
+      .in('vehicle_id', vehicleIds);
+
+    // Create lookup maps
+    const priceMap = new Map(prices?.map((p) => [p.variant_id, p]) || []);
+    const motorSpecsMap = new Map<string, Record<string, unknown>[]>();
+    motorSpecs?.forEach((spec) => {
+      if (!motorSpecsMap.has(spec.vehicle_id)) {
+        motorSpecsMap.set(spec.vehicle_id, []);
+      }
+      motorSpecsMap.get(spec.vehicle_id)!.push(spec);
+    });
+    const dimensionsMap = new Map(dimensions?.map((d) => [d.vehicle_id, d]) || []);
+
+    // Build catalog entries
+    const catalog = variants.map((variant) => {
+      const vehicle = variant.master_vehicles as {
+        id: string;
+        name: string;
+        slug: string;
+        model_year: number | null;
+        vehicle_type: string;
+        thumbnail_url: string | null;
+        master_brands: { id: string; name: string };
+      };
+      const brand = vehicle.master_brands;
+      const price = priceMap.get(variant.id);
+      const vehicleMotorSpecs = motorSpecsMap.get(vehicle.id) || [];
+      const vehicleDimensions = dimensionsMap.get(vehicle.id);
+
+      // Find matching motor spec
+      const matchingMotorSpec = vehicleMotorSpecs.find(
+        (spec) => spec.motor_key === variant.motor_key || spec.motor_type === variant.motor_type
+      );
+
+      return {
+        // Brand info
+        brand: brand.name,
+        brand_id: brand.id,
+        // Vehicle info
+        vehicle_id: vehicle.id,
+        vehicle_name: vehicle.name,
+        slug: vehicle.slug,
+        model_year: vehicle.model_year,
+        vehicle_type: vehicle.vehicle_type,
+        thumbnail_url: vehicle.thumbnail_url,
+        // Variant info
+        variant_id: variant.id,
+        variant_name: variant.name,
+        trim_level: variant.trim_level,
+        motor_type: variant.motor_type,
+        drivlina: variant.drivlina,
+        vaxellada: variant.vaxellada || (matchingMotorSpec?.vaxellada as string) || null,
+        // Motor specs
+        effekt_hk: (matchingMotorSpec?.effekt_hk as number) || null,
+        rackvidd_km: (matchingMotorSpec?.rackvidd_km as number) || null,
+        forbrukning: (matchingMotorSpec?.forbrukning as string) || null,
+        // Dimensions
+        langd: (vehicleDimensions?.langd as number) || null,
+        bagageutrymme_liter: (vehicleDimensions?.bagageutrymme_liter as number) || null,
+        // Pricing
+        pris: price?.pris || null,
+        old_pris: price?.old_pris || null,
+        privatleasing: price?.privatleasing || null,
+        foretagsleasing: price?.foretagsleasing || null,
+        billan_per_man: price?.billan_per_man || null,
+        // Campaign info
+        is_campaign: price?.is_campaign || false,
+        campaign_name: price?.campaign_name || null,
+        campaign_end: price?.campaign_end || null,
+        price_updated_at: price?.scraped_at || null,
+      };
+    });
+
+    // Apply remaining filters
+    let filteredCatalog = catalog;
+
+    if (filters?.brand) {
+      filteredCatalog = filteredCatalog.filter((item) => item.brand === filters.brand);
+    }
+    if (filters?.vehicleType) {
+      filteredCatalog = filteredCatalog.filter((item) => item.vehicle_type === filters.vehicleType);
+    }
+    if (filters?.isCampaign !== undefined) {
+      filteredCatalog = filteredCatalog.filter((item) => item.is_campaign === filters.isCampaign);
+    }
+
+    return filteredCatalog;
+  } catch (err) {
+    console.error('getVehicleCatalog error:', err);
+    throw err;
   }
-
-  return data;
 }
 
 /**
  * Get price history for a variant
  */
 export async function getPriceHistory(variantId: string, limit = 30) {
-  const client = getSupabaseClient();
+  const client = await getSupabaseClient();
 
   const { data, error } = await client
     .from('price_history')
@@ -727,7 +887,7 @@ export async function getPriceHistory(variantId: string, limit = 30) {
  * Get all equipment for a vehicle
  */
 export async function getVehicleEquipment(vehicleId: string) {
-  const client = getSupabaseClient();
+  const client = await getSupabaseClient();
 
   const { data, error } = await client
     .from('master_equipment')
@@ -746,7 +906,7 @@ export async function getVehicleEquipment(vehicleId: string) {
  * Get complete vehicle details including all specs
  */
 export async function getVehicleDetails(vehicleId: string) {
-  const client = getSupabaseClient();
+  const client = await getSupabaseClient();
 
   // Fetch all related data in parallel
   const [

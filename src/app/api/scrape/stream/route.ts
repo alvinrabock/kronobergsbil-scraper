@@ -3,6 +3,11 @@ import { scrapeWebsite, formatScrapedContent } from '@/lib/scraper'
 import { processHtmlWithSmartFactCheck } from '@/lib/ai-processor'
 import { ScrapeService } from '@/lib/database/scrapeService'
 import { getSupabaseServer } from '@/lib/supabase/server'
+import {
+  determineScrapeMode,
+  extractContentSections,
+  prepareHtmlWithUrlMarkers,
+} from '@/lib/smart-scrape'
 
 async function getUser() {
   try {
@@ -27,7 +32,7 @@ export async function POST(request: NextRequest) {
     return new Response('Unauthorized', { status: 401 })
   }
 
-  const { url, category, depth } = await request.json()
+  const { url, category, depth, brand } = await request.json()
 
   if (!url) {
     return new Response('URL is required', { status: 400 })
@@ -110,10 +115,10 @@ export async function POST(request: NextRequest) {
             progress: 10
           })) return; // Exit if client disconnected
 
-          sessionId = await scrapeService.createScrapeSession(user.id, url)
+          sessionId = await scrapeService.createScrapeSession(user.id, url, brand || undefined)
 
           // Log session created
-          await scrapeService.logInfo(sessionId, `Session started for URL: ${url}`, 'init', { depth, category })
+          await scrapeService.logInfo(sessionId, `Session started for URL: ${url}`, 'init', { depth, category, brand })
 
           // Check connection before proceeding
           if (!connectionActive || abortController.signal.aborted) {
@@ -194,13 +199,13 @@ export async function POST(request: NextRequest) {
           const scrapedContentIds = await scrapeService.saveScrapeResult(sessionId, scrapeResult)
           
           // ============================================================
-          // 🚫 AI ANALYSIS DISABLED FOR TESTING PDF DETECTION
+          // AI ANALYSIS TOGGLE
           // ============================================================
-          // To re-enable AI analysis, set SKIP_AI_ANALYSIS=false in .env
-          // or remove this entire block and uncomment the AI processing below
+          // Set SKIP_AI_ANALYSIS=true in .env to skip AI analysis
+          // Default: AI analysis is ENABLED
           // ============================================================
 
-          const skipAIAnalysis = process.env.SKIP_AI_ANALYSIS !== 'false' // Default: skip AI
+          const skipAIAnalysis = process.env.SKIP_AI_ANALYSIS === 'true' // Default: enable AI
 
           let totalItems = 0
           let successItems = 0
@@ -311,19 +316,84 @@ export async function POST(request: NextRequest) {
             const formattedContent = await formatScrapedContent(scrapeResult)
             console.log(`📄 Formatted content includes ${scrapeResult.linkedContent?.length || 0} linked pages`)
 
-            await scrapeService.logInfo(sessionId, 'Starting AI processing with Claude', 'ai_processing', {
-              contentLength: formattedContent.length,
-              category: category || 'auto-detect',
-              hasMetadata: !!metadata
+            // ============================================================
+            // SMART SCRAPE: Extract content sections with proper URL mapping
+            // ============================================================
+            const contentSections = extractContentSections(formattedContent, scrapeResult.url)
+            console.log(`📊 Extracted ${contentSections.length} content sections with URLs`)
+
+            // Log each section's URL for debugging
+            contentSections.forEach((section, i) => {
+              console.log(`  ${i + 1}. ${section.url} (${section.linkText})`)
             })
 
+            // Prepare HTML with explicit URL markers for each section
+            // This helps Claude correctly assign source_url to each vehicle
+            const preparedHtml = prepareHtmlWithUrlMarkers(contentSections)
+            console.log(`📝 Prepared HTML with URL markers: ${preparedHtml.length} chars`)
+
+            // Check if we should use smart scrape mode (price-only for existing vehicles)
+            let scrapeMode = 'full'
+            if (brand) {
+              try {
+                const smartResult = await determineScrapeMode(brand, formattedContent, scrapeResult.url)
+                scrapeMode = smartResult.mode
+                console.log(`🧠 Smart scrape mode: ${smartResult.mode} - ${smartResult.reason}`)
+
+                if (smartResult.mode === 'price_only') {
+                  await scrapeService.logInfo(sessionId, `Using price-only mode: ${smartResult.reason}`, 'smart_scrape', {
+                    mode: smartResult.mode,
+                    existingVehicles: smartResult.existingVehicles.length,
+                  })
+
+                  sendUpdateSafely({
+                    step: 'smart_scrape',
+                    message: `💡 Smart mode: Price-only extraction (${smartResult.existingVehicles.length} existing vehicles)`,
+                    progress: 72,
+                  })
+                } else if (smartResult.newVariants?.length) {
+                  await scrapeService.logInfo(sessionId, `New variants detected: ${smartResult.newVariants.join(', ')}`, 'smart_scrape')
+                }
+              } catch (smartError) {
+                console.warn('⚠️ Smart scrape check failed, using full mode:', smartError)
+              }
+            }
+
+            await scrapeService.logInfo(sessionId, `Starting AI processing with Claude (mode: ${scrapeMode})`, 'ai_processing', {
+              contentLength: preparedHtml.length,
+              category: category || 'auto-detect',
+              hasMetadata: !!metadata,
+              scrapeMode,
+              contentSections: contentSections.length,
+            })
+
+            // Use prepared HTML with clear URL markers
+            // Pass progress callback to receive PDF extraction updates
             aiResult = await processHtmlWithSmartFactCheck(
-              formattedContent,
+              preparedHtml,
               scrapeResult.url,
               category || 'auto-detect',
               true, // enableImageAnalysis
               metadata,
-              scrapeResult.pdfLinks // Pass PDF links from scraper for reliable extraction
+              scrapeResult.pdfLinks, // Pass PDF links from scraper for reliable extraction
+              // Progress callback for PDF extraction status
+              (step, message, data) => {
+                // Map step names to progress values
+                const progressMap: Record<string, number> = {
+                  'pdf_extraction_start': 72,
+                  'pdf_custom_extractor': 74,
+                  'pdf_standard_ocr': 74,
+                  'pdf_extraction_complete': 76,
+                };
+                const progress = progressMap[step] || 75;
+
+                sendUpdateSafely({
+                  step,
+                  message,
+                  progress,
+                  data
+                });
+              }
             )
             const aiProcessingTime = Date.now() - aiStartTime
 

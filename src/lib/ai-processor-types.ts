@@ -1,17 +1,259 @@
 // lib/ai-processor-types.ts
 // Types and utility functions (client-safe)
 
-// Campaign Data Structure
+// ============================================
+// NEW VEHICLE SCHEMA (2024)
+// ============================================
+
+// Variant specs (per-variant technical data)
+export interface VariantSpecs {
+  engine_cc?: number | null;
+  cylinders?: number | null;
+  power_kw?: number | null;
+  power_hp?: number | null;
+  torque_nm?: number | null;
+  top_speed_kmh?: number | null;
+  acceleration_0_100?: number | null;
+  fuel_consumption_l_100km?: number | null;
+  consumption_kwh_100km?: number | null;
+  co2_g_km?: number | null;
+  emission_class?: string | null;
+  range_km_wltp?: number | null;
+  battery_kwh?: number | null;
+  battery_type?: string | null;
+  battery_voltage?: number | null;
+  onboard_charger_kw?: number | null;
+  charging_time_home?: string | null;
+  charging_time_wallbox?: string | null;
+  charging_time_fast?: string | null;
+  drive_modes?: string[] | null;
+  curb_weight_kg?: number | null;
+  gross_weight_kg?: number | null;
+  max_payload_kg?: number | null;
+  max_towing_kg?: number | null;
+  turning_circle_m?: number | null;
+  tire_dimension?: string | null;
+}
+
+// Vehicle variant (trim level)
+export interface VehicleVariant {
+  id?: string;
+  name: string;
+  price?: number | null;
+  old_price?: number | null;
+  privatleasing?: number | null;
+  old_privatleasing?: number | null;
+  company_leasing?: number | null;
+  old_company_leasing?: number | null;
+  loan_price?: number | null;
+  old_loan_price?: number | null;
+  fuel_type?: 'Bensin' | 'Diesel' | 'Hybrid' | 'El' | null;
+  transmission?: 'Manuell' | 'Automat' | 'e-CVT' | null;
+  thumbnail?: string | null;
+  specs?: VariantSpecs | null;
+  equipment?: string[];
+}
+
+// Interior dimensions
+export interface InteriorDimensions {
+  front_headroom_mm?: number | null;
+  rear_headroom_mm?: number | null;
+  front_shoulder_width_mm?: number | null;
+  rear_shoulder_width_mm?: number | null;
+  front_legroom_mm?: number | null;
+  rear_legroom_mm?: number | null;
+  cargo_volume_l?: number | null;
+  cargo_width_mm?: number | null;
+  cargo_depth_mm?: number | null;
+  cargo_height_mm?: number | null;
+}
+
+// Vehicle dimensions (shared across variants)
+export interface VehicleDimensions {
+  length_mm?: number | null;
+  width_mm?: number | null;
+  height_mm?: number | null;
+  wheelbase_mm?: number | null;
+  front_overhang_mm?: number | null;
+  rear_overhang_mm?: number | null;
+  ground_clearance_mm?: number | null;
+  interior?: InteriorDimensions | null;
+}
+
+// Color option
+export interface ColorOption {
+  id?: string;
+  name: string;
+  type?: 'solid' | 'metallic' | 'pearl' | null;
+  price: number;
+  hex_code?: string | null;
+  available_for?: string[];
+}
+
+// Interior option
+export interface InteriorOption {
+  id?: string;
+  name: string;
+  material?: 'tyg' | 'konstläder' | 'läder' | 'alcantara' | null;
+  price: number;
+  available_for?: string[];
+  compatible_colors?: string[] | null;
+}
+
+// Extra option/package
+export interface VehicleOption {
+  id?: string;
+  name: string;
+  description?: string | null;
+  price: number;
+  available_for?: string[];
+}
+
+// Accessory
+export interface VehicleAccessory {
+  id?: string;
+  name: string;
+  description?: string | null;
+  price: number;
+  price_includes_installation?: boolean;
+  available_for?: string[];
+  items?: string[] | null;
+}
+
+// Service
+export interface VehicleService {
+  id?: string;
+  name: string;
+  description?: string | null;
+  price?: number | null;
+  duration_months?: number | null;
+  duration_years?: number | null;
+  max_mileage_km?: number | null;
+  conditions?: Record<string, any> | null;
+  phone?: string | null;
+  url?: string | null;
+}
+
+// Connected services feature
+export interface ConnectedServiceFeature {
+  category: string;
+  items: string[];
+}
+
+// Connected services
+export interface ConnectedServices {
+  name?: string | null;
+  price_monthly?: number | null;
+  free_period_years?: number | null;
+  features?: ConnectedServiceFeature[];
+}
+
+// Financing terms
+export interface LeasingTerms {
+  duration_months?: number | null;
+  mileage_per_year_km?: number | null;
+  service_included?: boolean | null;
+}
+
+export interface LoanTerms {
+  interest_rate_percent?: number | null;
+  downpayment_percent?: number | null;
+  duration_months?: number | null;
+  residual_percent?: number | null;
+}
+
+export interface FinancingInfo {
+  provider?: string | null;
+  partner?: string | null;
+  features?: string[] | null;
+  leasing_terms?: LeasingTerms | null;
+  loan_terms?: LoanTerms | null;
+}
+
+// Warranty deductible
+export interface WarrantyDeductible {
+  private?: number | null;
+  business?: number | null;
+}
+
+// Warranty
+export interface VehicleWarranty {
+  id?: string;
+  name: string;
+  duration_years?: number | null;
+  duration_km?: number | null;
+  deductible?: WarrantyDeductible | null;
+  notes?: string | null;
+}
+
+// Dealer info
+export interface DealerInfo {
+  general_agent?: string | null;
+  address?: string | null;
+  phone?: string | null;
+  fax?: string | null;
+  email?: string | null;
+  website?: string | null;
+}
+
+// Main Vehicle Data Structure (NEW SCHEMA)
+export interface VehicleData {
+  id?: string;
+  brand: string;
+  title: string;
+  description?: string | null;
+  thumbnail?: string | null;
+  vehicle_type?: 'cars' | 'motorcycles' | 'trucks';
+  body_type?: 'suv' | 'hatchback' | 'sedan' | 'wagon' | 'coupe' | 'convertible' | 'pickup' | 'van' | null;
+  source_url?: string | null;
+  updated_at?: string | null;
+
+  // Variants (trim levels with pricing)
+  variants: VehicleVariant[];
+  variant_count?: number;
+
+  // Shared dimensions
+  dimensions?: VehicleDimensions | null;
+
+  // Configuration options
+  colors?: ColorOption[];
+  interiors?: InteriorOption[];
+  options?: VehicleOption[];
+  accessories?: VehicleAccessory[];
+
+  // Services and support
+  services?: VehicleService[];
+  connected_services?: ConnectedServices | null;
+
+  // Financing
+  financing?: FinancingInfo | null;
+
+  // Warranties
+  warranties?: VehicleWarranty[];
+
+  // Dealer
+  dealer_info?: DealerInfo | null;
+
+  // Legacy fields for backward compatibility (will be removed)
+  vehicle_model?: any[];  // Deprecated - use variants
+  free_text?: string;
+  pdf_source_url?: string;
+}
+
+// ============================================
+// CAMPAIGN DATA (unchanged)
+// ============================================
+
 export interface CampaignVehicleModel {
   name: string;
   price: number;
   old_price?: number;
   privatleasing: number;
-  old_privatleasing?: number;  // Previous leasing price (for campaigns/discounts)
+  old_privatleasing?: number;
   company_leasing_price: number;
-  old_company_leasing_price?: number;  // Previous company leasing price
+  old_company_leasing_price?: number;
   loan_price?: number;
-  old_loan_price?: number;  // Previous loan price
+  old_loan_price?: number;
   thumbnail?: string;
 }
 
@@ -22,18 +264,21 @@ export interface CampaignIncluded {
 
 export interface CampaignData {
   title: string;
-  description: string; // max 160 characters for meta description
+  description: string;
   content: string;
   thumbnail: string;
   brand: string;
   vehicle_model: CampaignVehicleModel[];
-  campaign_start: string; // ISO date string
-  campaign_end: string; // ISO date string
+  campaign_start: string;
+  campaign_end: string;
   whats_included: CampaignIncluded[];
-  free_text: string; // conditions and legal text
+  free_text: string;
 }
 
-// Financing interfaces (shared between campaigns and vehicles)
+// ============================================
+// LEGACY TYPES (for backward compatibility)
+// ============================================
+
 export interface FinancingOption {
   monthly_price: number;
   period_months: number;
@@ -52,149 +297,34 @@ export interface FinancingOptions {
   loan?: FinancingOption[];
 }
 
-// Vehicle Data Structure (Cars & Transport Cars)
+// Legacy VehicleModel (for backward compatibility during transition)
 export interface VehicleModel {
   name: string;
-  variant?: string; // e.g., GS, Ultimate Tech, Electric
+  variant?: string;
   price: number;
   old_price?: number;
-  engine_type?: string; // Bensin/Hybrid/El
-  transmission?: string; // e.g., 8-växlad automat
-  privatleasing: number;
-  old_privatleasing?: number;  // Previous leasing price (for campaigns/discounts)
-  company_leasing_price: number;
-  old_company_leasing_price?: number;  // Previous company leasing price
-  loan_price?: number;
-  old_loan_price?: number;  // Previous loan price
-  thumbnail?: string;
-  financing_options?: FinancingOptions; // Keep for backward compatibility
-  // Vehicle specifications (Swedish field names)
-  bransle?: string;      // Fuel type: El, Bensin, Diesel, Hybrid, Laddhybrid
-  biltyp?: string;       // Vehicle type: suv, sedan, kombi, halvkombi, cab, coupe, minibuss, pickup, transportbil
-  vaxellada?: string;    // Transmission: Automat, Manuell
-  fuel_type?: string;    // Alias for bransle
-  car_type?: string;     // Alias for biltyp
-  utrustning?: string[]; // Equipment list for this trim level
-}
-
-// Technical specifications interfaces
-export interface EngineSpecs {
-  type?: string;
-  fuel_type?: string;
-  power_kw?: number;
-  power_hp?: number;
-  torque_nm?: number;
-  cylinders?: number;
-  displacement_cc?: number;
+  engine_type?: string;
   transmission?: string;
+  privatleasing: number;
+  old_privatleasing?: number;
+  company_leasing_price: number;
+  old_company_leasing_price?: number;
+  loan_price?: number;
+  old_loan_price?: number;
+  thumbnail?: string;
+  financing_options?: FinancingOptions;
+  bransle?: string;
+  biltyp?: string;
+  vaxellada?: string;
+  fuel_type?: string;
+  car_type?: string;
+  utrustning?: string[];
 }
 
-export interface PerformanceSpecs {
-  top_speed_kmh?: number;
-  acceleration_0_100?: number;
-  driving_range_km?: number;
-  electric_range_km?: number;
-}
+// ============================================
+// TOKEN USAGE & API TRACKING
+// ============================================
 
-export interface ConsumptionSpecs {
-  fuel_consumption_combined_l100km?: number;
-  fuel_consumption_city_l100km?: number;
-  fuel_consumption_highway_l100km?: number;
-  electricity_consumption_kwhper100km?: number;
-  co2_emissions_gkm?: number;
-  emission_standard?: string;
-  fuel_tank_capacity_l?: number;
-  battery_capacity_kwh?: number;
-  charging_time_ac_0_100?: string;
-  charging_time_dc_20_80?: string;
-}
-
-export interface TechnicalSpecs {
-  engine?: EngineSpecs;
-  performance?: PerformanceSpecs;
-  consumption?: ConsumptionSpecs;
-}
-
-export interface Dimensions {
-  length_mm?: number;
-  width_mm?: number;
-  width_with_mirrors_mm?: number;
-  height_mm?: number;
-  wheelbase_mm?: number;
-  ground_clearance_mm?: number;
-  turning_circle_m?: number;
-  trunk_volume_l?: number;
-  trunk_volume_max_l?: number;
-  seating_capacity?: number;
-  doors?: number;
-  weight_kg?: number;
-  max_weight_kg?: number;
-  max_roof_load_kg?: number;
-  max_towing_weight_kg?: number;
-}
-
-export interface StandardEquipment {
-  safety?: string[];
-  comfort?: string[];
-  technology?: string[];
-  exterior?: string[];
-  interior?: string[];
-}
-
-export interface EquipmentPackage {
-  name: string;
-  code?: string;
-  price?: number;
-  included_features?: string[];
-}
-
-export interface Equipment {
-  standard?: StandardEquipment;
-  packages?: EquipmentPackage[];
-}
-
-export interface ColorOption {
-  name: string;
-  code?: string;
-  type?: string; // solid/metallic/pearl
-  price?: number;
-}
-
-export interface WheelOption {
-  size?: string;
-  type?: string;
-  price?: number;
-  standard_on?: string[];
-}
-
-export interface Warranty {
-  vehicle_warranty_years?: number;
-  vehicle_warranty_km?: number;
-  paint_warranty_years?: number;
-  rust_warranty_years?: number;
-  battery_warranty_years?: number;
-  battery_warranty_km?: number;
-  roadside_assistance_years?: number;
-}
-
-export interface VehicleData {
-  title: string;
-  brand: string;
-  description: string; // max 160 characters for meta description
-  thumbnail: string;
-  vehicle_model: VehicleModel[];
-  technical_specs?: TechnicalSpecs;
-  dimensions?: Dimensions;
-  equipment?: Equipment;
-  available_colors?: ColorOption[];
-  wheel_options?: WheelOption[];
-  warranty?: Warranty;
-  free_text: string; // conditions and legal text
-  source_url?: string; // URL of the page where this vehicle was scraped from
-  pdf_source_url?: string; // URL of the PDF where data was extracted from
-}
-
-// Enhanced token usage tracking
 export interface TokenUsage {
   prompt_tokens: number;
   completion_tokens: number;
@@ -227,7 +357,6 @@ export interface ProcessedResult {
   token_usage?: TokenUsage;
   api_calls?: ApiCallDetails[];
   total_estimated_cost_usd?: number;
-  // Google Document AI OCR costs (separate from token-based AI costs)
   google_ocr_costs?: {
     total_pages: number;
     total_cost_usd: number;
@@ -269,17 +398,18 @@ export interface ProcessedResult {
   };
 }
 
-// Utility functions (client-safe)
+// ============================================
+// UTILITY FUNCTIONS
+// ============================================
+
 export function detectContentType(htmlContent: string, sourceUrl: string, category: string): 'campaigns' | 'cars' | 'transport_cars' {
-  // First check the provided category
   if (category === 'campaigns' || category === 'cars' || category === 'transport_cars') {
     return category as 'campaigns' | 'cars' | 'transport_cars';
   }
 
   const content = htmlContent.toLowerCase();
   const url = sourceUrl.toLowerCase();
-  
-  // Check URL patterns
+
   if (url.includes('erbjudand') || url.includes('kampanj') || url.includes('offer') || url.includes('finansiering')) {
     return 'campaigns';
   }
@@ -289,37 +419,34 @@ export function detectContentType(htmlContent: string, sourceUrl: string, catego
   if (url.includes('personbilar') || url.includes('modeller') || url.includes('cars')) {
     return 'cars';
   }
-  
-  // Check content keywords
+
   const campaignKeywords = ['kampanj', 'erbjudande', 'rabatt', 'specialpris', 'begränsat', 'sommar', 'vinter', 'finansiering'];
   const transportKeywords = ['transport', 'commercial', 'van', 'lastbil', 'företag'];
-  
+
   const campaignCount = campaignKeywords.filter(word => content.includes(word)).length;
   const transportCount = transportKeywords.filter(word => content.includes(word)).length;
-  
+
   if (campaignCount > 2) return 'campaigns';
   if (transportCount > 1) return 'transport_cars';
-  
-  return 'cars'; // default
+
+  return 'cars';
 }
 
-// Helper function to truncate description to 160 characters
 export function truncateDescription(text: string, maxLength: number = 160): string {
   if (!text) return '';
   if (text.length <= maxLength) return text;
-  
-  // Try to break at a word boundary
+
   const truncated = text.substring(0, maxLength);
   const lastSpaceIndex = truncated.lastIndexOf(' ');
-  
+
   if (lastSpaceIndex > maxLength * 0.8) {
     return truncated.substring(0, lastSpaceIndex) + '...';
   }
-  
+
   return truncated.substring(0, maxLength - 3) + '...';
 }
 
-// Validation functions for data integrity
+// Validation for campaign data
 export function validateCampaignData(campaign: any): CampaignData | null {
   try {
     if (!campaign.title || !campaign.brand) {
@@ -327,13 +454,12 @@ export function validateCampaignData(campaign: any): CampaignData | null {
       return null;
     }
 
-    // Ensure vehicle_model is an array
     const vehicleModels = Array.isArray(campaign.vehicle_model) ? campaign.vehicle_model : [];
     const validatedModels = vehicleModels.map((model: any) => ({
       name: model.name || '',
       price: parseFloat(model.price) || 0,
       old_price: parseFloat(model.old_price) || 0,
-      privatleasing: parseFloat(model.privatleasing) || parseFloat(model.leasing_price) || 0, // fallback to old name
+      privatleasing: parseFloat(model.privatleasing) || parseFloat(model.leasing_price) || 0,
       old_privatleasing: parseFloat(model.old_privatleasing) || 0,
       company_leasing_price: parseFloat(model.company_leasing_price) || 0,
       old_company_leasing_price: parseFloat(model.old_company_leasing_price) || 0,
@@ -342,7 +468,6 @@ export function validateCampaignData(campaign: any): CampaignData | null {
       thumbnail: model.thumbnail || ''
     }));
 
-    // Ensure whats_included is an array
     const whatsIncluded = Array.isArray(campaign.whats_included) ? campaign.whats_included : [];
     const validatedIncluded = whatsIncluded.map((item: any) => ({
       name: item.name || '',
@@ -367,6 +492,7 @@ export function validateCampaignData(campaign: any): CampaignData | null {
   }
 }
 
+// Validation for vehicle data (NEW SCHEMA)
 export function validateVehicleData(vehicle: any): VehicleData | null {
   try {
     if (!vehicle.title || !vehicle.brand) {
@@ -374,34 +500,72 @@ export function validateVehicleData(vehicle: any): VehicleData | null {
       return null;
     }
 
-    // Ensure vehicle_model is an array
-    const vehicleModels = Array.isArray(vehicle.vehicle_model) ? vehicle.vehicle_model : [];
-    const validatedModels = vehicleModels.map((model: any) => ({
-      name: model.name || '',
-      price: parseFloat(model.price) || 0,
-      old_price: parseFloat(model.old_price) || 0,
-      privatleasing: parseFloat(model.privatleasing) || parseFloat(model.leasing_price) || 0, // fallback to old name
-      old_privatleasing: parseFloat(model.old_privatleasing) || 0,
-      company_leasing_price: parseFloat(model.company_leasing_price) || 0,
-      old_company_leasing_price: parseFloat(model.old_company_leasing_price) || 0,
-      loan_price: parseFloat(model.loan_price) || 0,
-      old_loan_price: parseFloat(model.old_loan_price) || 0,
-      thumbnail: model.thumbnail || '',
-      bransle: model.bransle || null,
-      biltyp: model.biltyp || null,
-      vaxellada: model.vaxellada || null,
-      utrustning: Array.isArray(model.utrustning) ? model.utrustning : []
-    }));
+    // Handle new variants format
+    let variants: VehicleVariant[] = [];
+
+    if (Array.isArray(vehicle.variants)) {
+      variants = vehicle.variants.map((v: any) => ({
+        id: v.id,
+        name: v.name || '',
+        price: v.price ?? null,
+        old_price: v.old_price ?? null,
+        privatleasing: v.privatleasing ?? null,
+        old_privatleasing: v.old_privatleasing ?? null,
+        company_leasing: v.company_leasing ?? null,
+        old_company_leasing: v.old_company_leasing ?? null,
+        loan_price: v.loan_price ?? null,
+        old_loan_price: v.old_loan_price ?? null,
+        fuel_type: v.fuel_type ?? null,
+        transmission: v.transmission ?? null,
+        thumbnail: v.thumbnail ?? null,
+        specs: v.specs ?? null,
+        equipment: Array.isArray(v.equipment) ? v.equipment : []
+      }));
+    }
+    // Legacy: convert vehicle_model to variants
+    else if (Array.isArray(vehicle.vehicle_model)) {
+      variants = vehicle.vehicle_model.map((m: any) => ({
+        name: m.name || '',
+        price: m.price ?? null,
+        old_price: m.old_price ?? null,
+        privatleasing: m.privatleasing ?? null,
+        old_privatleasing: m.old_privatleasing ?? null,
+        company_leasing: m.company_leasing_price ?? null,
+        old_company_leasing: m.old_company_leasing_price ?? null,
+        loan_price: m.loan_price ?? null,
+        old_loan_price: m.old_loan_price ?? null,
+        fuel_type: m.bransle ?? m.fuel_type ?? null,
+        transmission: m.vaxellada ?? m.transmission ?? null,
+        thumbnail: m.thumbnail ?? null,
+        equipment: Array.isArray(m.utrustning) ? m.utrustning : []
+      }));
+    }
 
     return {
-      title: vehicle.title,
+      id: vehicle.id,
       brand: vehicle.brand,
+      title: vehicle.title,
       description: truncateDescription(vehicle.description || ''),
-      thumbnail: vehicle.thumbnail || '',
-      vehicle_model: validatedModels,
+      thumbnail: vehicle.thumbnail ?? null,
+      vehicle_type: vehicle.vehicle_type ?? 'cars',
+      body_type: vehicle.body_type ?? null,
+      source_url: vehicle.source_url ?? null,
+      updated_at: vehicle.updated_at ?? new Date().toISOString(),
+      variants,
+      variant_count: variants.length,
+      dimensions: vehicle.dimensions ?? null,
+      colors: Array.isArray(vehicle.colors) ? vehicle.colors : [],
+      interiors: Array.isArray(vehicle.interiors) ? vehicle.interiors : [],
+      options: Array.isArray(vehicle.options) ? vehicle.options : [],
+      accessories: Array.isArray(vehicle.accessories) ? vehicle.accessories : [],
+      services: Array.isArray(vehicle.services) ? vehicle.services : [],
+      connected_services: vehicle.connected_services ?? null,
+      financing: vehicle.financing ?? null,
+      warranties: Array.isArray(vehicle.warranties) ? vehicle.warranties : [],
+      dealer_info: vehicle.dealer_info ?? null,
+      // Legacy
       free_text: vehicle.free_text || '',
-      source_url: vehicle.source_url || null,
-      pdf_source_url: vehicle.pdf_source_url || null
+      pdf_source_url: vehicle.pdf_source_url
     };
   } catch (error) {
     console.error('Error validating vehicle data:', error);
@@ -409,10 +573,10 @@ export function validateVehicleData(vehicle: any): VehicleData | null {
   }
 }
 
-// Utility function to format currency for display
+// Currency formatting
 export function formatCurrency(amount: number, currency: string = 'SEK'): string {
   if (!amount || amount === 0) return 'Price on request';
-  
+
   return new Intl.NumberFormat('sv-SE', {
     style: 'currency',
     currency: currency,
@@ -421,10 +585,10 @@ export function formatCurrency(amount: number, currency: string = 'SEK'): string
   }).format(amount);
 }
 
-// Utility function to format dates
+// Date formatting
 export function formatDate(dateString: string): string {
   if (!dateString) return '';
-  
+
   try {
     const date = new Date(dateString);
     return new Intl.DateTimeFormat('sv-SE', {
@@ -437,31 +601,30 @@ export function formatDate(dateString: string): string {
   }
 }
 
-// API Pricing (as of 2024 - these should be updated regularly)
+// API Pricing
 export const API_PRICING = {
   claude: {
     'claude-sonnet-4-5': {
-      prompt_tokens: 3.0 / 1000000, // $3.00 per 1M tokens
-      completion_tokens: 15.0 / 1000000, // $15.00 per 1M tokens
+      prompt_tokens: 3.0 / 1000000,
+      completion_tokens: 15.0 / 1000000,
     },
     'claude-haiku-3-5': {
-      prompt_tokens: 0.8 / 1000000, // $0.80 per 1M tokens
-      completion_tokens: 4.0 / 1000000, // $4.00 per 1M tokens
+      prompt_tokens: 0.8 / 1000000,
+      completion_tokens: 4.0 / 1000000,
     },
     'claude-opus-4': {
-      prompt_tokens: 15.0 / 1000000, // $15.00 per 1M tokens
-      completion_tokens: 75.0 / 1000000, // $75.00 per 1M tokens
+      prompt_tokens: 15.0 / 1000000,
+      completion_tokens: 75.0 / 1000000,
     },
   },
   perplexity: {
     'sonar': {
-      prompt_tokens: 1.0 / 1000000, // $1.00 per 1M tokens (estimated)
-      completion_tokens: 3.0 / 1000000, // $3.00 per 1M tokens (estimated)
+      prompt_tokens: 1.0 / 1000000,
+      completion_tokens: 3.0 / 1000000,
     },
   },
 } as const;
 
-// Cost calculation utilities
 export function calculateTokenCost(
   promptTokens: number,
   completionTokens: number,
@@ -474,9 +637,7 @@ export function calculateTokenCost(
     return 0;
   }
 
-  // Type-safe pricing lookup
   const pricing = (providerPricing as any)[model];
-
   if (!pricing) {
     console.warn(`Unknown pricing for ${provider}:${model}`);
     return 0;
@@ -503,7 +664,7 @@ export function createTokenUsage(
 
 export function formatCost(costUsd: number): string {
   if (costUsd < 0.001) {
-    return `$${(costUsd * 1000).toFixed(3)}k`; // Show in thousandths
+    return `$${(costUsd * 1000).toFixed(3)}k`;
   }
   return `$${costUsd.toFixed(4)}`;
 }

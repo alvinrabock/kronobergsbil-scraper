@@ -14,6 +14,8 @@ interface StreamingProgressProps {
     url: string;
     category: string;
     depth: number;
+    brand?: string;
+    autoPushToCMS?: boolean;
   };
   onComplete: (sessionId: string) => void;
   onError: (error: string) => void;
@@ -25,12 +27,23 @@ const stepIcons: Record<string, string> = {
   scraping_start: '🌐',
   scraping_complete: '✅',
   saving_content: '💾',
+  pdf_extraction_start: '📄',
+  pdf_custom_extractor: '🔬',
+  pdf_standard_ocr: '📝',
+  pdf_claude_extraction: '🔮',
+  pdf_extraction_complete: '📑',
+  pdf_fact_check_start: '🔍',
+  pdf_fact_check_complete: '✔️',
+  pdf_fact_check_failed: '⚠️',
+  pdf_fact_check_error: '⚠️',
   ai_processing_start: '🤖',
   ai_batch_processing: '🔄',
   fact_checking_complete: '✔️',
   ai_processing_complete: '🧠',
   saving_ai_results: '📊',
   data_saved: '🗄️',
+  cms_push_start: '📤',
+  cms_push_complete: '✅',
   complete: '🎉',
   error: '❌'
 };
@@ -41,12 +54,23 @@ const stepNames: Record<string, string> = {
   scraping_start: 'Starting Scrape',
   scraping_complete: 'Scraping Complete',
   saving_content: 'Saving Content',
+  pdf_extraction_start: 'PDF Extraction',
+  pdf_custom_extractor: 'Custom Extractor (Full Data)',
+  pdf_standard_ocr: 'PDF Text Extraction (OCR)',
+  pdf_claude_extraction: 'Claude PDF Extraction',
+  pdf_extraction_complete: 'PDF Processing Complete',
+  pdf_fact_check_start: 'Perplexity Fact-Check',
+  pdf_fact_check_complete: 'Fact-Check Complete',
+  pdf_fact_check_failed: 'Fact-Check Warning',
+  pdf_fact_check_error: 'Fact-Check Error',
   ai_processing_start: 'AI Analysis',
   ai_batch_processing: 'Batch Processing',
   fact_checking_complete: 'Fact Checking',
   ai_processing_complete: 'AI Complete',
   saving_ai_results: 'Saving AI Results',
   data_saved: 'Data Saved',
+  cms_push_start: 'Pushing to CMS',
+  cms_push_complete: 'CMS Updated',
   complete: 'Complete',
   error: 'Error'
 };
@@ -57,8 +81,82 @@ export function StreamingProgress({ scrapingParams, onComplete, onError }: Strea
   const [currentStep, setCurrentStep] = useState('');
   const [isComplete, setIsComplete] = useState(false);
   const [hasError, setHasError] = useState(false);
+  const [isPushingToCMS, setIsPushingToCMS] = useState(false);
+  const [cmsPushResult, setCmsPushResult] = useState<{success: boolean; created: number; updated: number; failed: number} | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const hasStartedRef = useRef(false); // Prevent double-execution in React Strict Mode
+
+  // Function to push data to CMS
+  const pushToCMS = async (sessionId: string) => {
+    setIsPushingToCMS(true);
+    setUpdates(prev => [...prev, {
+      step: 'cms_push_start',
+      message: 'Pushing data to Payload CMS...',
+      progress: 97
+    }]);
+    setCurrentStep('cms_push_start');
+
+    try {
+      // First fetch the session data
+      const sessionResponse = await fetch(`/api/scrape/${sessionId}`);
+      const sessionData = await sessionResponse.json();
+
+      if (!sessionData.success || !sessionData.vehicles || sessionData.vehicles.length === 0) {
+        throw new Error('No vehicles found to push to CMS');
+      }
+
+      // Push to CMS via the import API
+      const pushResponse = await fetch('/api/import/fordon', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vehicles: sessionData.vehicles.map((v: any) => ({
+            name: v.name,
+            brand: v.brand,
+            varianter: v.varianter || [],
+            source_url: v.source_url,
+            bilder: v.bilder || [],
+            image_url: v.image_url
+          }))
+        })
+      });
+
+      const pushResult = await pushResponse.json();
+
+      if (pushResult.success) {
+        setCmsPushResult({
+          success: true,
+          created: pushResult.summary?.created || 0,
+          updated: pushResult.summary?.updated || 0,
+          failed: pushResult.summary?.failed || 0
+        });
+        setUpdates(prev => [...prev, {
+          step: 'cms_push_complete',
+          message: `CMS updated: ${pushResult.summary?.created || 0} created, ${pushResult.summary?.updated || 0} updated`,
+          progress: 99
+        }]);
+        setCurrentStep('cms_push_complete');
+      } else {
+        throw new Error(pushResult.error || 'CMS push failed');
+      }
+    } catch (error) {
+      console.error('CMS push error:', error);
+      setCmsPushResult({
+        success: false,
+        created: 0,
+        updated: 0,
+        failed: 1
+      });
+      setUpdates(prev => [...prev, {
+        step: 'cms_push_complete',
+        message: `CMS push failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        progress: 99,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }]);
+    } finally {
+      setIsPushingToCMS(false);
+    }
+  };
 
   useEffect(() => {
     // Prevent duplicate requests (React Strict Mode runs effects twice in dev)
@@ -112,8 +210,17 @@ export function StreamingProgress({ scrapingParams, onComplete, onError }: Strea
                 setCurrentStep(data.step || '');
 
                 if (data.step === 'complete' && data.sessionId) {
-                  setIsComplete(true);
-                  onComplete(data.sessionId);
+                  // If auto-push is enabled, push to CMS before completing
+                  if (scrapingParams.autoPushToCMS) {
+                    console.log('📤 Auto-push enabled, pushing to CMS...');
+                    pushToCMS(data.sessionId).then(() => {
+                      setIsComplete(true);
+                      onComplete(data.sessionId);
+                    });
+                  } else {
+                    setIsComplete(true);
+                    onComplete(data.sessionId);
+                  }
                 } else if (data.step === 'error') {
                   setHasError(true);
                   onError(data.error || data.message);
@@ -156,16 +263,79 @@ export function StreamingProgress({ scrapingParams, onComplete, onError }: Strea
 
   // Build dynamic step list based on what actually happened
   const buildStepList = () => {
-    const baseSteps = ['initializing', 'session_created', 'scraping_start', 'scraping_complete', 
-                      'saving_content', 'ai_processing_start', 'ai_batch_processing'];
-    
+    const baseSteps = ['initializing', 'session_created', 'scraping_start', 'scraping_complete',
+                      'saving_content'];
+
+    // Check if PDF extraction occurred
+    const hasPdfExtraction = updates.some(update =>
+      update.step === 'pdf_extraction_start' ||
+      update.step === 'pdf_custom_extractor' ||
+      update.step === 'pdf_standard_ocr' ||
+      update.step === 'pdf_claude_extraction'
+    );
+
+    if (hasPdfExtraction) {
+      baseSteps.push('pdf_extraction_start');
+
+      // Show which extraction method was used
+      const hasCustomExtractor = updates.some(update => update.step === 'pdf_custom_extractor');
+      const hasStandardOcr = updates.some(update => update.step === 'pdf_standard_ocr');
+      const hasClaudeExtraction = updates.some(update => update.step === 'pdf_claude_extraction');
+
+      if (hasCustomExtractor) {
+        baseSteps.push('pdf_custom_extractor');
+      }
+      if (hasStandardOcr) {
+        baseSteps.push('pdf_standard_ocr');
+      }
+      if (hasClaudeExtraction) {
+        baseSteps.push('pdf_claude_extraction');
+      }
+
+      baseSteps.push('pdf_extraction_complete');
+
+      // Check if Perplexity fact-checking occurred
+      const hasFactCheck = updates.some(update =>
+        update.step === 'pdf_fact_check_start' ||
+        update.step === 'pdf_fact_check_complete' ||
+        update.step === 'pdf_fact_check_failed' ||
+        update.step === 'pdf_fact_check_error'
+      );
+
+      if (hasFactCheck) {
+        baseSteps.push('pdf_fact_check_start');
+        const factCheckResult = updates.find(update =>
+          update.step === 'pdf_fact_check_complete' ||
+          update.step === 'pdf_fact_check_failed' ||
+          update.step === 'pdf_fact_check_error'
+        );
+        if (factCheckResult) {
+          baseSteps.push(factCheckResult.step);
+        }
+      }
+    }
+
+    baseSteps.push('ai_processing_start', 'ai_batch_processing');
+
     // Check if fact-checking occurred
     const hasFactChecking = updates.some(update => update.step === 'fact_checking_complete');
     if (hasFactChecking) {
       baseSteps.push('fact_checking_complete');
     }
-    
-    baseSteps.push('ai_processing_complete', 'saving_ai_results', 'data_saved', 'complete');
+
+    baseSteps.push('ai_processing_complete', 'saving_ai_results', 'data_saved');
+
+    // Check if CMS push occurred or is expected
+    const hasCmsPush = updates.some(update =>
+      update.step === 'cms_push_start' ||
+      update.step === 'cms_push_complete'
+    ) || scrapingParams.autoPushToCMS;
+
+    if (hasCmsPush) {
+      baseSteps.push('cms_push_start', 'cms_push_complete');
+    }
+
+    baseSteps.push('complete');
     return baseSteps;
   };
   

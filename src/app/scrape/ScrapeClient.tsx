@@ -15,6 +15,7 @@ interface UrlData {
   category: string;
   contentType: string;
   label?: string;
+  brand?: string;
 }
 
 interface CategorizedResult extends ScrapeResult {
@@ -63,7 +64,7 @@ export default function ScrapeClient() {
     return 'An unexpected error occurred';
   };
 
-  const handleScrapeMultiple = async (urls: UrlData[]): Promise<void> => {
+  const handleScrapeMultiple = async (urls: UrlData[], options?: { autoPushToCMS?: boolean }): Promise<void> => {
     if (urls.length === 0) return;
 
     // Prevent concurrent scrapes
@@ -74,15 +75,16 @@ export default function ScrapeClient() {
 
     try {
       setScrapeInProgress(true);
-      
+
       // Take the first URL for now (we'll handle multiple URLs later)
       const urlData = urls[0];
-      
+
       console.log('🚀 Starting scrape process for:', urlData.url);
-      
+      console.log('📤 Auto-push to CMS:', options?.autoPushToCMS ? 'Enabled' : 'Disabled');
+
       // Generate a temporary ID and create entry in localStorage
       const tempId = Date.now().toString(36) + Math.random().toString(36).substr(2);
-      
+
       const newEntry: ArchiveEntry = {
         id: tempId,
         timestamp: new Date(),
@@ -98,20 +100,22 @@ export default function ScrapeClient() {
         scrapingParams: {
           url: urlData.url,
           category: urlData.category,
-          depth: 1
+          brand: urlData.brand,
+          depth: 1,
+          autoPushToCMS: options?.autoPushToCMS || false
         }
       }));
-      
+
       console.log('📱 Navigating to processing page:', tempId);
-      
+
       // Navigate immediately to show the process
       router.push(`/scrape/${tempId}`);
-      
+
       // Reset the scrape flag after navigation (allow new scrape after 3 seconds)
       setTimeout(() => {
         setScrapeInProgress(false);
       }, 3000);
-      
+
     } catch (error) {
       console.error('❌ Navigation error:', error);
       setError(getErrorMessage(error));

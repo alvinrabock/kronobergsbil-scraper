@@ -3,6 +3,7 @@ import { getSupabaseServer } from '@/lib/supabase/server'
 import { Database } from './types'
 import { ScrapeResult, LinkedContent } from '@/lib/scraper'
 import { ProcessedResult, CampaignData, VehicleData } from '@/lib/ai-processor-types'
+import { deduplicateVariants, VariantData } from '@/lib/variant-deduplication'
 
 type Tables = Database['public']['Tables']
 type ScrapeSession = Tables['scrape_sessions']['Row']
@@ -28,13 +29,14 @@ export class ScrapeService {
   }
 
   // Create a new scraping session
-  async createScrapeSession(userId: string, url: string): Promise<string> {
+  async createScrapeSession(userId: string, url: string, brand?: string): Promise<string> {
     const client = await this.getClient()
     const { data, error } = await client
       .from('scrape_sessions')
       .insert({
         user_id: userId,
         url,
+        brand: brand || null,
         status: 'pending'
       })
       .select('id')
@@ -42,6 +44,260 @@ export class ScrapeService {
 
     if (error) throw new Error(`Failed to create scrape session: ${error.message}`)
     return data.id
+  }
+
+  // Save URL-brand mapping to registry (updated for new schema)
+  async saveUrlBrandMapping(
+    url: string,
+    brand: string,
+    contentType: 'campaigns' | 'cars' | 'transport_cars' | 'model_page',
+    options?: {
+      label?: string;
+      modelName?: string;
+      pdfPricelistId?: string;
+      userId?: string;
+    }
+  ): Promise<string> {
+    const client = await this.getClient()
+
+    // Upsert to handle duplicates
+    const { data, error } = await client
+      .from('url_brand_registry')
+      .upsert({
+        url,
+        brand,
+        content_type: contentType,
+        label: options?.label || null,
+        model_name: options?.modelName || null,
+        pdf_pricelist_id: options?.pdfPricelistId || null,
+        created_by: options?.userId || null,
+        updated_at: new Date().toISOString()
+      }, {
+        onConflict: 'url,brand'
+      })
+      .select('id')
+      .single()
+
+    if (error) throw new Error(`Failed to save URL-brand mapping: ${error.message}`)
+    return data.id
+  }
+
+  // Get all URL-brand mappings for a brand
+  async getUrlsForBrand(brand: string): Promise<any[]> {
+    const client = await this.getClient()
+    const { data, error } = await client
+      .from('url_brand_registry')
+      .select('*')
+      .eq('brand', brand)
+      .eq('is_active', true)
+      .order('content_type')
+
+    if (error) throw new Error(`Failed to get URLs for brand: ${error.message}`)
+    return data || []
+  }
+
+  // Get all registered URLs
+  async getAllRegisteredUrls(): Promise<any[]> {
+    const client = await this.getClient()
+    const { data, error } = await client
+      .from('url_brand_registry')
+      .select('*')
+      .eq('is_active', true)
+      .order('brand')
+      .order('content_type')
+
+    if (error) throw new Error(`Failed to get registered URLs: ${error.message}`)
+    return data || []
+  }
+
+  // ============================================
+  // PDF Pricelists methods (new table)
+  // ============================================
+
+  // Create or update a PDF pricelist entry
+  async upsertPdfPricelist(
+    pdfUrl: string,
+    brand: string,
+    options?: {
+      modelName?: string;
+      sourceType?: 'product_page' | 'pdf_hub' | 'direct_link' | 'manual';
+      sourceUrl?: string;
+      label?: string;
+      validFrom?: Date;
+      validTo?: Date;
+      contentHash?: string;
+      fileSizeBytes?: number;
+      extractedPrices?: any;
+    }
+  ): Promise<string> {
+    const client = await this.getClient()
+
+    const { data, error } = await client
+      .from('pdf_pricelists')
+      .upsert({
+        pdf_url: pdfUrl,
+        brand,
+        model_name: options?.modelName || null,
+        source_type: options?.sourceType || 'manual',
+        source_url: options?.sourceUrl || null,
+        label: options?.label || null,
+        valid_from: options?.validFrom?.toISOString().split('T')[0] || null,
+        valid_to: options?.validTo?.toISOString().split('T')[0] || null,
+        content_hash: options?.contentHash || null,
+        file_size_bytes: options?.fileSizeBytes || null,
+        extracted_prices: options?.extractedPrices || null,
+        last_checked_at: new Date().toISOString(),
+        parse_status: options?.extractedPrices ? 'success' : 'pending',
+        updated_at: new Date().toISOString()
+      }, {
+        onConflict: 'pdf_url,brand'
+      })
+      .select('id')
+      .single()
+
+    if (error) throw new Error(`Failed to upsert PDF pricelist: ${error.message}`)
+    return data.id
+  }
+
+  // Update PDF hash for change detection (now in pdf_pricelists table)
+  async updatePdfHash(pdfPricelistId: string, contentHash: string, fileSizeBytes?: number): Promise<void> {
+    const client = await this.getClient()
+    const { error } = await client
+      .from('pdf_pricelists')
+      .update({
+        content_hash: contentHash,
+        file_size_bytes: fileSizeBytes || null,
+        last_checked_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', pdfPricelistId)
+
+    if (error) throw new Error(`Failed to update PDF hash: ${error.message}`)
+  }
+
+  // Get PDF pricelists for a brand
+  async getPdfPricelistsForBrand(brand: string): Promise<any[]> {
+    const client = await this.getClient()
+    const { data, error } = await client
+      .from('pdf_pricelists')
+      .select('*')
+      .eq('brand', brand)
+      .eq('is_active', true)
+      .order('model_name')
+
+    if (error) throw new Error(`Failed to get PDF pricelists: ${error.message}`)
+    return data || []
+  }
+
+  // Get PDF pricelists that need checking
+  async getPdfPricelistsToCheck(): Promise<any[]> {
+    const client = await this.getClient()
+
+    // Get pricelists where last_checked_at + check_frequency_hours < now
+    const { data, error } = await client
+      .from('pdf_pricelists')
+      .select('*')
+      .eq('is_active', true)
+      .order('last_checked_at', { ascending: true, nullsFirst: true })
+      .limit(20)
+
+    if (error) throw new Error(`Failed to get PDF pricelists to check: ${error.message}`)
+    return data || []
+  }
+
+  // Update extracted prices from PDF
+  async updateExtractedPrices(pdfPricelistId: string, prices: any): Promise<void> {
+    const client = await this.getClient()
+    const { error } = await client
+      .from('pdf_pricelists')
+      .update({
+        extracted_prices: {
+          extracted_at: new Date().toISOString(),
+          ...prices
+        },
+        parse_status: 'success',
+        parse_error: null,
+        last_changed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', pdfPricelistId)
+
+    if (error) throw new Error(`Failed to update extracted prices: ${error.message}`)
+  }
+
+  // Mark PDF parsing as failed
+  async markPdfParseFailed(pdfPricelistId: string, errorMessage: string): Promise<void> {
+    const client = await this.getClient()
+    const { error } = await client
+      .from('pdf_pricelists')
+      .update({
+        parse_status: 'failed',
+        parse_error: errorMessage,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', pdfPricelistId)
+
+    if (error) throw new Error(`Failed to mark PDF parse failed: ${error.message}`)
+  }
+
+  // ============================================
+  // Brand Sources methods (new table)
+  // ============================================
+
+  // Get brand source configuration
+  async getBrandSource(brand: string): Promise<any | null> {
+    const client = await this.getClient()
+    const { data, error } = await client
+      .from('brand_sources')
+      .select('*')
+      .eq('brand', brand)
+      .eq('is_active', true)
+      .single()
+
+    if (error && error.code !== 'PGRST116') {
+      throw new Error(`Failed to get brand source: ${error.message}`)
+    }
+    return data || null
+  }
+
+  // Get all active brand sources
+  async getAllBrandSources(): Promise<any[]> {
+    const client = await this.getClient()
+    const { data, error } = await client
+      .from('brand_sources')
+      .select('*')
+      .eq('is_active', true)
+      .order('display_order')
+
+    if (error) throw new Error(`Failed to get brand sources: ${error.message}`)
+    return data || []
+  }
+
+  // Update brand source configuration
+  async updateBrandSource(
+    brand: string,
+    updates: {
+      pdfHubUrl?: string;
+      modelsPageUrl?: string;
+      campaignsPageUrl?: string;
+      pdfParserConfig?: any;
+      logoUrl?: string;
+    }
+  ): Promise<void> {
+    const client = await this.getClient()
+    const { error } = await client
+      .from('brand_sources')
+      .update({
+        pdf_hub_url: updates.pdfHubUrl,
+        models_page_url: updates.modelsPageUrl,
+        campaigns_page_url: updates.campaignsPageUrl,
+        pdf_parser_config: updates.pdfParserConfig,
+        logo_url: updates.logoUrl,
+        updated_at: new Date().toISOString()
+      })
+      .eq('brand', brand)
+
+    if (error) throw new Error(`Failed to update brand source: ${error.message}`)
   }
 
   // Update scrape session with page info
@@ -215,7 +471,9 @@ export class ScrapeService {
         total_estimated_cost_usd: totalCost > 0 ? totalCost : null,
         api_calls: apiCallDetails.length > 0 ? apiCallDetails : null,
         google_ocr_costs: googleOcrCosts || null,
-        raw_pdf_text: (result as any).raw_pdf_text || null
+        raw_pdf_text: (result as any).raw_pdf_text || null,
+        custom_extractor_data: (result as any).custom_extractor_data || null,
+        two_tier_results: (result as any).two_tier_results || null
       })
       .select('id')
       .single()
@@ -414,61 +672,288 @@ export class ScrapeService {
     }
   }
 
-  // Save vehicles from AI processing
+  /**
+   * Normalize vehicle title for comparison
+   * Handles electric variant naming (e-208 → 208, e-Corsa → Corsa)
+   */
+  private normalizeVehicleTitle(title: string): string {
+    if (!title) return ''
+    return title
+      // Remove "e-" prefix from electric variants (e-208 → 208, e-Corsa → Corsa)
+      .replace(/^e-/i, '')
+      // Remove "Electric" suffix
+      .replace(/\s*Electric$/i, '')
+      // Remove "EV" suffix
+      .replace(/\s*EV$/i, '')
+      .trim()
+  }
+
+  /**
+   * Pre-process vehicles to merge duplicates before saving
+   * Merges vehicles with same normalized title (e.g., e-208 into 208)
+   */
+  private mergeVehicleDuplicates(vehicles: VehicleData[]): VehicleData[] {
+    const vehicleMap = new Map<string, VehicleData>()
+
+    for (const vehicle of vehicles) {
+      const normalizedTitle = this.normalizeVehicleTitle(vehicle.title)
+      const key = `${(vehicle.brand || '').toLowerCase()}::${normalizedTitle.toLowerCase()}`
+
+      if (vehicleMap.has(key)) {
+        const existing = vehicleMap.get(key)!
+        console.log(`🔄 Merging "${vehicle.title}" into "${existing.title}"`)
+
+        // Prefer the shorter/base title (208 over e-208)
+        if (vehicle.title.length < existing.title.length) {
+          existing.title = vehicle.title
+        }
+
+        // Merge variants
+        const existingVariants = existing.variants || existing.vehicle_model || []
+        const incomingVariants = vehicle.variants || vehicle.vehicle_model || []
+
+        // Add incoming variants that don't exist in existing
+        for (const incoming of incomingVariants) {
+          const exists = existingVariants.some(v =>
+            v.name.toLowerCase() === incoming.name.toLowerCase()
+          )
+          if (!exists) {
+            existingVariants.push(incoming)
+          } else {
+            // Merge equipment if existing variant has empty equipment
+            const existingVariant = existingVariants.find(v =>
+              v.name.toLowerCase() === incoming.name.toLowerCase()
+            )
+            if (existingVariant && (!existingVariant.equipment || existingVariant.equipment.length === 0)) {
+              if (incoming.equipment && incoming.equipment.length > 0) {
+                existingVariant.equipment = incoming.equipment
+              }
+            }
+          }
+        }
+
+        existing.variants = existingVariants
+        existing.vehicle_model = existingVariants
+
+        // Merge other fields if existing is empty
+        if (!existing.description && vehicle.description) existing.description = vehicle.description
+        if (!existing.thumbnail && vehicle.thumbnail) existing.thumbnail = vehicle.thumbnail
+        if (!existing.body_type && vehicle.body_type) existing.body_type = vehicle.body_type
+
+      } else {
+        vehicleMap.set(key, { ...vehicle })
+      }
+    }
+
+    const merged = Array.from(vehicleMap.values())
+    if (merged.length < vehicles.length) {
+      console.log(`🔄 Merged ${vehicles.length} vehicles into ${merged.length}`)
+    }
+    return merged
+  }
+
+  // Save vehicles from AI processing - uses UPSERT to prevent duplicates
   async saveVehicles(sessionId: string, aiResultId: string, vehicles: VehicleData[], vehicleType: 'cars' | 'transport_cars'): Promise<void> {
     const client = await this.getClient()
-    for (const vehicle of vehicles) {
-      // Save vehicle
-      const { data: vehicleData, error: vehicleError } = await client
+
+    // Pre-process: merge duplicate vehicles (e.g., e-208 into 208)
+    const mergedVehicles = this.mergeVehicleDuplicates(vehicles)
+
+    for (const vehicle of mergedVehicles) {
+      let vehicleId: string
+
+      // Normalize title for comparison
+      const normalizedTitle = this.normalizeVehicleTitle(vehicle.title)
+
+      // First, try to find existing vehicle by brand + title (exact or normalized)
+      // Try exact title first
+      let existingVehicle: { id: string; title: string } | null = null
+
+      const { data: exactMatch } = await client
         .from('vehicles')
-        .insert({
-          ai_result_id: aiResultId,
-          session_id: sessionId,
-          title: vehicle.title,
-          brand: vehicle.brand,
-          description: vehicle.description,
-          thumbnail_url: vehicle.thumbnail,
-          vehicle_type: vehicleType,
-          body_type: vehicle.body_type,
-          free_text: vehicle.free_text,
-          source_url: vehicle.source_url,
-          pdf_source_url: vehicle.pdf_source_url
-        })
-        .select('id')
+        .select('id, title')
+        .ilike('brand', vehicle.brand || '')
+        .ilike('title', vehicle.title)
         .single()
 
-      if (vehicleError) {
-        console.error('Failed to save vehicle:', vehicleError)
-        continue
+      if (exactMatch) {
+        existingVehicle = exactMatch
+      } else {
+        // Try normalized title (handles e-208 matching 208)
+        const { data: normalizedMatch } = await client
+          .from('vehicles')
+          .select('id, title')
+          .ilike('brand', vehicle.brand || '')
+          .ilike('title', normalizedTitle)
+          .single()
+
+        if (normalizedMatch) {
+          existingVehicle = normalizedMatch
+          console.log(`🔗 Found existing vehicle "${normalizedMatch.title}" for "${vehicle.title}"`)
+        } else {
+          // Try matching with e- prefix (if current is "208", find "e-208")
+          const { data: electricMatch } = await client
+            .from('vehicles')
+            .select('id, title')
+            .ilike('brand', vehicle.brand || '')
+            .ilike('title', `e-${normalizedTitle}`)
+            .single()
+
+          if (electricMatch) {
+            existingVehicle = electricMatch
+            console.log(`🔗 Found electric variant "${electricMatch.title}" for "${vehicle.title}", will merge`)
+          }
+        }
       }
 
-      // Save vehicle models
-      if (vehicle.vehicle_model?.length > 0) {
-        const vehicleModels = vehicle.vehicle_model.map(model => ({
-          vehicle_id: vehicleData.id,
-          name: model.name,
-          price: model.price,
-          old_price: model.old_price,
-          privatleasing: model.privatleasing,
-          old_privatleasing: model.old_privatleasing,
-          company_leasing_price: model.company_leasing_price,
-          old_company_leasing_price: model.old_company_leasing_price,
-          loan_price: model.loan_price,
-          old_loan_price: model.old_loan_price,
-          thumbnail_url: model.thumbnail,
-          // Vehicle specifications
-          bransle: model.bransle || model.fuel_type || null,
-          biltyp: model.biltyp || model.car_type || null,
-          vaxellada: model.vaxellada || model.transmission || null,
-          utrustning: model.utrustning || null
-        }))
+      // Prepare new schema fields for vehicle
+      const vehicleNewSchemaFields = {
+        dimensions: vehicle.dimensions || null,
+        colors: vehicle.colors || [],
+        interiors: vehicle.interiors || [],
+        options: vehicle.options || [],
+        accessories: vehicle.accessories || [],
+        services: vehicle.services || [],
+        connected_services: vehicle.connected_services || null,
+        financing: vehicle.financing || null,
+        warranties: vehicle.warranties || [],
+        dealer_info: vehicle.dealer_info || null,
+        variant_count: vehicle.variant_count || vehicle.variants?.length || vehicle.vehicle_model?.length || 0
+      }
 
-        const { error: modelsError } = await client
+      if (existingVehicle) {
+        // Update existing vehicle
+        vehicleId = existingVehicle.id
+
+        // Prefer the base title (208) over electric variant (e-208)
+        const baseTitle = normalizedTitle.length < existingVehicle.title.length
+          ? normalizedTitle
+          : (vehicle.title.length < existingVehicle.title.length ? vehicle.title : existingVehicle.title)
+
+        const { error: updateError } = await client
+          .from('vehicles')
+          .update({
+            ai_result_id: aiResultId,
+            session_id: sessionId,
+            title: baseTitle, // Update to base title if shorter
+            description: vehicle.description || undefined,
+            thumbnail_url: vehicle.thumbnail || undefined,
+            vehicle_type: vehicleType,
+            body_type: vehicle.body_type || undefined,
+            free_text: vehicle.free_text || undefined,
+            source_url: vehicle.source_url || undefined,
+            pdf_source_url: vehicle.pdf_source_url || undefined,
+            updated_at: new Date().toISOString(),
+            // NEW SCHEMA: Add rich extracted data
+            ...vehicleNewSchemaFields
+          })
+          .eq('id', vehicleId)
+
+        if (updateError) {
+          console.error('Failed to update vehicle:', updateError)
+          continue
+        }
+        console.log(`📝 Updated existing vehicle: ${vehicle.brand} ${baseTitle} (${vehicleNewSchemaFields.variant_count} variants, ${vehicleNewSchemaFields.colors?.length || 0} colors, ${vehicleNewSchemaFields.warranties?.length || 0} warranties)`)
+      } else {
+        // Insert new vehicle with normalized title (208 instead of e-208)
+        const titleToInsert = normalizedTitle.length > 0 ? normalizedTitle : vehicle.title
+
+        const { data: vehicleData, error: vehicleError } = await client
+          .from('vehicles')
+          .insert({
+            ai_result_id: aiResultId,
+            session_id: sessionId,
+            title: titleToInsert,
+            brand: vehicle.brand,
+            description: vehicle.description,
+            thumbnail_url: vehicle.thumbnail,
+            vehicle_type: vehicleType,
+            body_type: vehicle.body_type,
+            free_text: vehicle.free_text,
+            source_url: vehicle.source_url,
+            pdf_source_url: vehicle.pdf_source_url,
+            // NEW SCHEMA: Add rich extracted data
+            ...vehicleNewSchemaFields
+          })
+          .select('id')
+          .single()
+
+        if (vehicleError) {
+          console.error('Failed to save vehicle:', vehicleError)
+          continue
+        }
+        vehicleId = vehicleData.id
+        console.log(`✅ Created new vehicle: ${vehicle.brand} ${titleToInsert} (${vehicleNewSchemaFields.variant_count} variants, ${vehicleNewSchemaFields.colors?.length || 0} colors, ${vehicleNewSchemaFields.warranties?.length || 0} warranties)`)
+      }
+
+      // Save/update vehicle models - support both variants (new) and vehicle_model (legacy)
+      const rawModels = vehicle.variants || vehicle.vehicle_model || []
+
+      // Deduplicate variants before saving (handles "Elektrisk 100kW" vs "Elektrisk 100kW Steglös Automat")
+      const modelsToSave = rawModels.length > 0
+        ? deduplicateVariants(rawModels as VariantData[], 0.80) // Higher threshold - only merge near-identical variants
+        : []
+
+      if (modelsToSave.length > 0) {
+        // CLEAN SLATE: Delete ALL existing variants for this vehicle before re-saving
+        // This prevents duplicate accumulation from multiple scrapes
+        const { data: existingModels } = await client
           .from('vehicle_models')
-          .insert(vehicleModels)
+          .select('id, name')
+          .eq('vehicle_id', vehicleId)
 
-        if (modelsError) {
-          console.error('Failed to save vehicle models:', modelsError)
+        const existingModelsList = existingModels || []
+
+        if (existingModelsList.length > 0) {
+          console.log(`   🧹 Deleting ${existingModelsList.length} existing variants for clean re-save`)
+          const { error: deleteError } = await client
+            .from('vehicle_models')
+            .delete()
+            .eq('vehicle_id', vehicleId)
+
+          if (deleteError) {
+            console.error(`   ❌ Failed to delete existing variants:`, deleteError.message)
+          }
+        }
+
+        // Now insert all new variants fresh (no matching needed - clean slate)
+        console.log(`   📥 Inserting ${modelsToSave.length} variants`)
+
+        for (const model of modelsToSave) {
+          // Map from both new variants format and legacy vehicle_model format
+          const modelData = {
+            vehicle_id: vehicleId,
+            name: model.name,
+            price: model.price ?? null,
+            old_price: model.old_price ?? null,
+            privatleasing: model.privatleasing ?? null,
+            old_privatleasing: model.old_privatleasing ?? null,
+            company_leasing_price: model.company_leasing ?? model.company_leasing_price ?? null,
+            old_company_leasing_price: model.old_company_leasing ?? model.old_company_leasing_price ?? null,
+            loan_price: model.loan_price ?? null,
+            old_loan_price: model.old_loan_price ?? null,
+            thumbnail_url: model.thumbnail ?? null,
+            // Legacy fields (still supported)
+            bransle: model.bransle ?? model.fuel_type ?? null,
+            biltyp: model.biltyp ?? model.car_type ?? null,
+            vaxellada: model.vaxellada ?? model.transmission ?? null,
+            utrustning: model.utrustning ?? model.equipment ?? null,
+            // NEW SCHEMA: Additional fields
+            specs: model.specs ?? null,
+            fuel_type: model.fuel_type ?? model.bransle ?? null,
+            transmission: model.transmission ?? model.vaxellada ?? null,
+            equipment: model.equipment ?? model.utrustning ?? []
+          }
+
+          const { error: insertError } = await client
+            .from('vehicle_models')
+            .insert(modelData)
+
+          if (insertError) {
+            console.error('Failed to save vehicle model:', insertError)
+          } else {
+            console.log(`   ✅ Created model: ${model.name} (equipment: ${(model.equipment?.length || model.utrustning?.length || 0)} items)`)
+          }
         }
       }
     }

@@ -9,9 +9,15 @@ interface VehicleModel {
   price?: number;
   old_price?: number;
   privatleasing?: number;
-  company_leasing_price?: number;
+  company_leasing?: number;        // New schema
+  company_leasing_price?: number;  // Legacy schema
   loan_price?: number;
   thumbnail_url?: string;
+  thumbnail?: string;              // New schema
+  fuel_type?: string;
+  transmission?: string;
+  specs?: any;
+  equipment?: string[];
 }
 
 interface Vehicle {
@@ -20,9 +26,11 @@ interface Vehicle {
   brand?: string;
   description?: string;
   thumbnail_url?: string;
+  thumbnail?: string;              // New schema
   vehicle_type?: string;
   free_text?: string;
-  vehicle_models?: VehicleModel[];
+  vehicle_models?: VehicleModel[]; // Legacy schema
+  variants?: VehicleModel[];       // New schema
 }
 
 interface CMSPushPanelProps {
@@ -138,22 +146,41 @@ export function CMSPushPanel({ aiResults }: CMSPushPanelProps) {
 
     try {
       // Transform vehicles to the format expected by the API
-      const transformedVehicles = selectedList.map(vehicle => ({
-        title: vehicle.title,
-        brand: vehicle.brand,
-        description: vehicle.description || vehicle.free_text || '',
-        thumbnail: vehicle.thumbnail_url,
-        vehicle_model: (vehicle.vehicle_models || []).map(model => ({
-          name: model.name,
-          price: model.price,
-          old_price: model.old_price,
-          privatleasing: model.privatleasing,
-          company_leasing_price: model.company_leasing_price,
-          loan_price: model.loan_price,
-          thumbnail: model.thumbnail_url
-        })),
-        free_text: vehicle.free_text
-      }));
+      // Handle both new schema (variants) and legacy schema (vehicle_models)
+      const transformedVehicles = selectedList.map(vehicle => {
+        const models = vehicle.variants || vehicle.vehicle_models || [];
+        return {
+          title: vehicle.title,
+          brand: vehicle.brand,
+          description: vehicle.description || vehicle.free_text || '',
+          thumbnail: vehicle.thumbnail_url || vehicle.thumbnail,
+          // Use new 'variants' field name for CMS API, but also include legacy for backward compat
+          variants: models.map(model => ({
+            name: model.name,
+            price: model.price,
+            old_price: model.old_price,
+            privatleasing: model.privatleasing,
+            company_leasing: model.company_leasing || model.company_leasing_price,
+            loan_price: model.loan_price,
+            thumbnail: model.thumbnail_url || model.thumbnail,
+            fuel_type: model.fuel_type,
+            transmission: model.transmission,
+            specs: model.specs,
+            equipment: model.equipment
+          })),
+          // Legacy field for backward compatibility
+          vehicle_model: models.map(model => ({
+            name: model.name,
+            price: model.price,
+            old_price: model.old_price,
+            privatleasing: model.privatleasing,
+            company_leasing_price: model.company_leasing || model.company_leasing_price,
+            loan_price: model.loan_price,
+            thumbnail: model.thumbnail_url || model.thumbnail
+          })),
+          free_text: vehicle.free_text
+        };
+      });
 
       console.log('🚀 Pushing to CMS:', transformedVehicles);
 
@@ -327,11 +354,13 @@ export function CMSPushPanel({ aiResults }: CMSPushPanelProps) {
         {vehicles.map((vehicle, index) => {
           const key = getVehicleKey(vehicle, index);
           const isSelected = selectedVehicles.has(key);
-          const modelCount = vehicle.vehicle_models?.length || 0;
-          const lowestPrice = vehicle.vehicle_models?.reduce((min, m) =>
+          // Handle both new schema (variants) and legacy schema (vehicle_models)
+          const models = vehicle.variants || vehicle.vehicle_models || [];
+          const modelCount = models.length;
+          const lowestPrice = models.reduce((min, m) =>
             m.price && m.price > 0 && (min === null || m.price < min) ? m.price : min
           , null as number | null);
-          const lowestLeasing = vehicle.vehicle_models?.reduce((min, m) =>
+          const lowestLeasing = models.reduce((min, m) =>
             m.privatleasing && m.privatleasing > 0 && (min === null || m.privatleasing < min) ? m.privatleasing : min
           , null as number | null);
 
@@ -408,16 +437,16 @@ export function CMSPushPanel({ aiResults }: CMSPushPanelProps) {
                   )}
 
                   {/* Models Preview */}
-                  {vehicle.vehicle_models && vehicle.vehicle_models.length > 0 && (
+                  {models.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-1">
-                      {vehicle.vehicle_models.slice(0, 5).map((model, mIdx) => (
+                      {models.slice(0, 5).map((model, mIdx) => (
                         <span key={mIdx} className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-xs">
                           {model.name}
                         </span>
                       ))}
-                      {vehicle.vehicle_models.length > 5 && (
+                      {models.length > 5 && (
                         <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">
-                          +{vehicle.vehicle_models.length - 5} till
+                          +{models.length - 5} till
                         </span>
                       )}
                     </div>

@@ -170,6 +170,8 @@ export interface Database {
           debug_info: any | null
           google_ocr_costs: any | null
           raw_pdf_text: string | null
+          custom_extractor_data: any | null
+          two_tier_results: any | null
         }
         Insert: {
           id?: string
@@ -192,6 +194,8 @@ export interface Database {
           debug_info?: any | null
           google_ocr_costs?: any | null
           raw_pdf_text?: string | null
+          custom_extractor_data?: any | null
+          two_tier_results?: any | null
         }
         Update: {
           id?: string
@@ -214,6 +218,8 @@ export interface Database {
           debug_info?: any | null
           google_ocr_costs?: any | null
           raw_pdf_text?: string | null
+          custom_extractor_data?: any | null
+          two_tier_results?: any | null
         }
       }
       campaigns: {
@@ -273,10 +279,24 @@ export interface Database {
           description: string | null
           thumbnail_url: string | null
           vehicle_type: 'cars' | 'transport_cars'
+          body_type: string | null
+          source_url: string | null
           free_text: string | null
           pdf_source_url: string | null
           created_at: string
           updated_at: string
+          // NEW SCHEMA: Rich extracted data
+          dimensions: any | null
+          colors: any[] | null
+          interiors: any[] | null
+          options: any[] | null
+          accessories: any[] | null
+          services: any[] | null
+          connected_services: any | null
+          financing: any | null
+          warranties: any[] | null
+          dealer_info: any | null
+          variant_count: number
         }
         Insert: {
           id?: string
@@ -287,10 +307,24 @@ export interface Database {
           description?: string | null
           thumbnail_url?: string | null
           vehicle_type: 'cars' | 'transport_cars'
+          body_type?: string | null
+          source_url?: string | null
           free_text?: string | null
           pdf_source_url?: string | null
           created_at?: string
           updated_at?: string
+          // NEW SCHEMA: Rich extracted data
+          dimensions?: any | null
+          colors?: any[] | null
+          interiors?: any[] | null
+          options?: any[] | null
+          accessories?: any[] | null
+          services?: any[] | null
+          connected_services?: any | null
+          financing?: any | null
+          warranties?: any[] | null
+          dealer_info?: any | null
+          variant_count?: number
         }
         Update: {
           id?: string
@@ -301,10 +335,24 @@ export interface Database {
           description?: string | null
           thumbnail_url?: string | null
           vehicle_type?: 'cars' | 'transport_cars'
+          body_type?: string | null
+          source_url?: string | null
           free_text?: string | null
           pdf_source_url?: string | null
           created_at?: string
           updated_at?: string
+          // NEW SCHEMA: Rich extracted data
+          dimensions?: any | null
+          colors?: any[] | null
+          interiors?: any[] | null
+          options?: any[] | null
+          accessories?: any[] | null
+          services?: any[] | null
+          connected_services?: any | null
+          financing?: any | null
+          warranties?: any[] | null
+          dealer_info?: any | null
+          variant_count?: number
         }
       }
       campaign_vehicle_models: {
@@ -373,6 +421,11 @@ export interface Database {
           vaxellada: string | null
           utrustning: string[] | null
           created_at: string
+          // NEW SCHEMA: Additional fields
+          specs: any | null
+          fuel_type: string | null
+          transmission: string | null
+          equipment: string[] | null
         }
         Insert: {
           id?: string
@@ -392,6 +445,11 @@ export interface Database {
           vaxellada?: string | null
           utrustning?: string[] | null
           created_at?: string
+          // NEW SCHEMA: Additional fields
+          specs?: any | null
+          fuel_type?: string | null
+          transmission?: string | null
+          equipment?: string[] | null
         }
         Update: {
           id?: string
@@ -411,6 +469,11 @@ export interface Database {
           vaxellada?: string | null
           utrustning?: string[] | null
           created_at?: string
+          // NEW SCHEMA: Additional fields
+          specs?: any | null
+          fuel_type?: string | null
+          transmission?: string | null
+          equipment?: string[] | null
         }
       }
       saved_links: {

@@ -56,6 +56,74 @@ interface ScrapeLog {
   created_at: string;
 }
 
+/**
+ * Transform database vehicle format to new schema format
+ * Converts vehicle_models to variants with proper field names
+ */
+function transformVehicleToNewSchema(vehicle: any): any {
+  return {
+    id: vehicle.id,
+    brand: vehicle.brand,
+    title: vehicle.title,
+    description: vehicle.description || null,
+    thumbnail: vehicle.thumbnail_url || null,
+    vehicle_type: vehicle.vehicle_type || 'cars',
+    body_type: vehicle.body_type || null,
+    source_url: vehicle.source_url || null,
+    pdf_source_url: vehicle.pdf_source_url || null,
+    updated_at: vehicle.updated_at || null,
+    created_at: vehicle.created_at || null,
+
+    // Transform vehicle_models to variants (new schema)
+    variants: (vehicle.vehicle_models || []).map((model: any) => ({
+      id: model.id,
+      name: model.name,
+      price: model.price ?? null,
+      old_price: model.old_price ?? null,
+      privatleasing: model.privatleasing ?? null,
+      old_privatleasing: model.old_privatleasing ?? null,
+      company_leasing: model.company_leasing_price ?? null,
+      old_company_leasing: model.old_company_leasing_price ?? null,
+      loan_price: model.loan_price ?? null,
+      old_loan_price: model.old_loan_price ?? null,
+      fuel_type: model.bransle || null,
+      transmission: model.vaxellada || null,
+      thumbnail: model.thumbnail_url || null,
+      specs: {
+        power_kw: null,
+        power_hp: null,
+        torque_nm: null,
+        top_speed_kmh: null,
+        acceleration_0_100: null,
+        fuel_consumption_l_100km: null,
+        consumption_kwh_100km: null,
+        co2_g_km: null,
+        range_km_wltp: null,
+        battery_kwh: null,
+        curb_weight_kg: null,
+        max_towing_kg: null
+      },
+      equipment: model.utrustning || []
+    })),
+    variant_count: (vehicle.vehicle_models || []).length,
+
+    // Additional fields (not stored in DB yet)
+    dimensions: null,
+    colors: [],
+    interiors: [],
+    options: [],
+    accessories: [],
+    services: [],
+    connected_services: null,
+    financing: null,
+    warranties: [],
+    dealer_info: null,
+
+    // Legacy fields
+    free_text: vehicle.free_text || ''
+  };
+}
+
 
 export default function ScrapeResultPage() {
   const params = useParams();
@@ -64,9 +132,11 @@ export default function ScrapeResultPage() {
   const [currentEntry, setCurrentEntry] = useState<ArchiveEntry | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [streamingParams, setStreamingParams] = useState<{url: string, category: string, depth: number} | null>(null);
+  const [streamingParams, setStreamingParams] = useState<{url: string, category: string, depth: number, brand?: string, autoPushToCMS?: boolean} | null>(null);
   const [showLogs, setShowLogs] = useState(false);
   const [showPdfText, setShowPdfText] = useState(false);
+  const [showCustomExtractor, setShowCustomExtractor] = useState(false);
+  const [showTwoTierResults, setShowTwoTierResults] = useState(false);
 
   const scrapeId = params?.id as string;
 
@@ -208,16 +278,20 @@ export default function ScrapeResultPage() {
                 debug_info: originalAiResult.debug_info || null,
                 google_ocr_costs: originalAiResult.google_ocr_costs || null,
                 raw_pdf_text: originalAiResult.raw_pdf_text || null,
+                // Two-tier PDF extraction data
+                custom_extractor_data: originalAiResult.custom_extractor_data || null,
+                two_tier_results: originalAiResult.two_tier_results || null,
                 source_url: dbData.session.url
               };
 
-              // Add vehicles to the consolidated result
+              // Add vehicles to the consolidated result (transformed to new schema)
               if (dbData.vehicles) {
                 dbData.vehicles.forEach((vehicle: any) => {
+                  const transformedVehicle = transformVehicleToNewSchema(vehicle);
                   if (vehicle.vehicle_type === 'cars') {
-                    consolidatedAiResult.cars.push(vehicle);
+                    consolidatedAiResult.cars.push(transformedVehicle);
                   } else if (vehicle.vehicle_type === 'transport_cars') {
-                    consolidatedAiResult.transport_cars.push(vehicle);
+                    consolidatedAiResult.transport_cars.push(transformedVehicle);
                   }
                 });
               }
@@ -521,6 +595,239 @@ export default function ScrapeResultPage() {
                     <pre className="text-xs font-mono whitespace-pre-wrap bg-gray-50 p-4 rounded border">
                       {currentEntry.aiResults[0].raw_pdf_text}
                     </pre>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Two-Tier Results Section - shows which tier was used for each PDF */}
+            {currentEntry.aiResults?.[0]?.two_tier_results && (
+              <div className="mt-8 bg-white rounded-lg shadow-md overflow-hidden">
+                <button
+                  onClick={() => setShowTwoTierResults(!showTwoTierResults)}
+                  className="w-full px-6 py-4 bg-purple-50 border-b flex items-center justify-between hover:bg-purple-100 transition-colors"
+                >
+                  <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    🔬 Two-Tier PDF Extraction Results
+                    <span className="bg-purple-100 text-purple-800 text-xs px-2 py-0.5 rounded-full">
+                      {(currentEntry.aiResults[0].two_tier_results as any[]).length} PDFs
+                    </span>
+                  </h2>
+                  <svg
+                    className={`h-5 w-5 text-gray-500 transform transition-transform ${showTwoTierResults ? 'rotate-180' : ''}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {showTwoTierResults && (
+                  <div className="p-4 space-y-4">
+                    {(currentEntry.aiResults[0].two_tier_results as any[]).map((result: any, idx: number) => (
+                      <div key={idx} className={`p-4 rounded-lg border ${result.tier === 'custom' ? 'bg-green-50 border-green-200' : 'bg-yellow-50 border-yellow-200'}`}>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className={`text-sm font-medium px-2 py-1 rounded ${result.tier === 'custom' ? 'bg-green-200 text-green-800' : 'bg-yellow-200 text-yellow-800'}`}>
+                            {result.tier === 'custom' ? '🔬 Custom Extractor' : '📝 Standard OCR'}
+                          </span>
+                          <span className="text-xs text-gray-500">
+                            {result.pageCount} pages • ${result.estimatedCost?.toFixed(4) || '0.0000'}
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-700 mb-1 font-mono truncate">{result.pdfUrl}</p>
+                        <p className="text-xs text-gray-500">Reason: {result.reason}</p>
+                        {result.tier === 'custom' && (
+                          <p className="text-xs mt-1">
+                            <span className="text-green-600 font-medium">
+                              ✅ {result.variantsExtracted} variants extracted
+                            </span>
+                            {result.hasEquipment && (
+                              <span className="ml-2 text-blue-600">• Has equipment data</span>
+                            )}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Custom Extractor Data Section - shows raw Document AI output */}
+            {currentEntry.aiResults?.[0]?.custom_extractor_data && (
+              <div className="mt-8 bg-white rounded-lg shadow-md overflow-hidden">
+                <button
+                  onClick={() => setShowCustomExtractor(!showCustomExtractor)}
+                  className="w-full px-6 py-4 bg-green-50 border-b flex items-center justify-between hover:bg-green-100 transition-colors"
+                >
+                  <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                    🧠 Custom Document AI Extractor Output
+                    <span className="bg-green-100 text-green-800 text-xs px-2 py-0.5 rounded-full">
+                      {(currentEntry.aiResults[0].custom_extractor_data as any).variants?.length || 0} variants
+                    </span>
+                  </h2>
+                  <svg
+                    className={`h-5 w-5 text-gray-500 transform transition-transform ${showCustomExtractor ? 'rotate-180' : ''}`}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {showCustomExtractor && (
+                  <div className="p-4 max-h-[800px] overflow-y-auto">
+                    <div className="mb-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                      <h3 className="font-medium text-blue-800 mb-2">📊 Extraction Summary</h3>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div>Variants: <span className="font-mono">{(currentEntry.aiResults[0].custom_extractor_data as any).variants?.length || 0}</span></div>
+                        <div>Has Equipment: <span className="font-mono">{(currentEntry.aiResults[0].custom_extractor_data as any).equipment ? 'Yes' : 'No'}</span></div>
+                        <div>Raw Entities: <span className="font-mono">{(currentEntry.aiResults[0].custom_extractor_data as any).rawEntities?.length || 0}</span></div>
+                      </div>
+                    </div>
+
+                    {/* Show raw entities grouped by type */}
+                    {(currentEntry.aiResults[0].custom_extractor_data as any).rawEntities && (
+                      <div className="mb-4">
+                        <h3 className="font-medium text-gray-800 mb-2">📋 Raw Entities by Type</h3>
+                        <div className="space-y-2">
+                          {Object.entries(
+                            ((currentEntry.aiResults[0].custom_extractor_data as any).rawEntities as any[]).reduce((acc: Record<string, any[]>, entity: any) => {
+                              if (!acc[entity.type]) acc[entity.type] = [];
+                              acc[entity.type].push(entity);
+                              return acc;
+                            }, {})
+                          ).map(([type, entities]: [string, any]) => (
+                            <details key={type} className="border rounded-lg">
+                              <summary className="px-3 py-2 bg-gray-100 cursor-pointer hover:bg-gray-200 font-medium text-sm flex items-center justify-between">
+                                <span>{type}</span>
+                                <span className="bg-gray-300 text-gray-700 text-xs px-2 py-0.5 rounded-full">{(entities as any[]).length}</span>
+                              </summary>
+                              <div className="p-3 space-y-2 max-h-64 overflow-y-auto">
+                                {(entities as any[]).map((entity: any, idx: number) => (
+                                  <div key={idx} className="p-2 bg-gray-50 rounded text-xs border">
+                                    <div className="font-mono text-gray-800">
+                                      {entity.mentionText || entity.normalizedValue?.text || '-'}
+                                    </div>
+                                    {entity.confidence && (
+                                      <div className="text-gray-500 mt-1">Confidence: {(entity.confidence * 100).toFixed(1)}%</div>
+                                    )}
+                                    {entity.properties && entity.properties.length > 0 && (
+                                      <div className="mt-1 pl-2 border-l-2 border-blue-200">
+                                        <span className="text-gray-500">Properties:</span>
+                                        {entity.properties.map((prop: any, pIdx: number) => (
+                                          <div key={pIdx} className="text-blue-700">
+                                            {prop.type}: {prop.mentionText || prop.normalizedValue?.text || '-'}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </details>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Show parsed variants */}
+                    {(currentEntry.aiResults[0].custom_extractor_data as any).variants?.length > 0 && (
+                      <>
+                        <h3 className="font-medium text-gray-800 mb-2 mt-4">🚗 Parsed Variants</h3>
+                        <div className="space-y-4">
+                          {(currentEntry.aiResults[0].custom_extractor_data as any).variants?.map((variant: any, idx: number) => (
+                            <div key={idx} className="p-4 bg-gray-50 rounded-lg border">
+                              <h4 className="font-medium text-gray-900 mb-2">{variant.name || variant.Modell || `Variant ${idx + 1}`}</h4>
+                              <div className="grid grid-cols-2 md:grid-cols-3 gap-2 text-xs mb-3">
+                                {variant.price && <div>💰 Price: <span className="font-mono">{variant.price}</span></div>}
+                                {variant.privatleasing && <div>📋 Privatleasing: <span className="font-mono">{variant.privatleasing}</span></div>}
+                                {variant.companyLeasing && <div>🏢 Företagsleasing: <span className="font-mono">{variant.companyLeasing}</span></div>}
+                                {variant.loanPrice && <div>💳 Loan: <span className="font-mono">{variant.loanPrice}</span></div>}
+                              </div>
+
+                              {variant.equipment && variant.equipment.length > 0 && (
+                                <div className="mt-2 pt-2 border-t border-gray-200">
+                                  <h5 className="text-xs font-medium text-gray-700 mb-1">🛠️ Equipment ({variant.equipment.length} items):</h5>
+                                  <div className="flex flex-wrap gap-1">
+                                    {variant.equipment.map((eq: string, eqIdx: number) => (
+                                      <span key={eqIdx} className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded">
+                                        {eq}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+
+                    {/* Show equipment if present at top level */}
+                    {(currentEntry.aiResults[0].custom_extractor_data as any).equipment && (
+                      <div className="mt-4">
+                        <h3 className="font-medium text-gray-800 mb-2">🛠️ Equipment</h3>
+                        {Object.entries((currentEntry.aiResults[0].custom_extractor_data as any).equipment).map(([category, items]: [string, any]) => (
+                          <div key={category} className="mb-2">
+                            <span className="font-medium text-sm text-gray-700">{category}:</span>
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {(items as string[]).map((item: string, idx: number) => (
+                                <span key={idx} className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded">
+                                  {item}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Show all entity data by type - organized view */}
+                    {(currentEntry.aiResults[0].custom_extractor_data as any).entityData && (
+                      <div className="mt-6">
+                        <h3 className="font-medium text-gray-800 mb-3">📊 All Entity Data by Type</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {Object.entries((currentEntry.aiResults[0].custom_extractor_data as any).entityData)
+                            .filter(([, items]) => (items as string[]).length > 0)
+                            .sort(([, a], [, b]) => (b as string[]).length - (a as string[]).length)
+                            .map(([type, items]: [string, any]) => (
+                              <details key={type} className="border rounded-lg bg-white">
+                                <summary className="px-3 py-2 bg-gradient-to-r from-indigo-50 to-purple-50 cursor-pointer hover:from-indigo-100 hover:to-purple-100 font-medium text-sm flex items-center justify-between rounded-t-lg">
+                                  <span className="text-indigo-800">{type}</span>
+                                  <span className="bg-indigo-200 text-indigo-800 text-xs px-2 py-0.5 rounded-full font-bold">
+                                    {(items as string[]).length}
+                                  </span>
+                                </summary>
+                                <div className="p-3 max-h-48 overflow-y-auto">
+                                  <div className="flex flex-wrap gap-1">
+                                    {(items as string[]).map((item: string, idx: number) => (
+                                      <span
+                                        key={idx}
+                                        className="text-xs bg-gray-100 text-gray-800 px-2 py-1 rounded border border-gray-200 font-mono"
+                                      >
+                                        {item}
+                                      </span>
+                                    ))}
+                                  </div>
+                                </div>
+                              </details>
+                            ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Raw JSON output */}
+                    <details className="mt-4">
+                      <summary className="cursor-pointer text-sm text-gray-600 hover:text-gray-800">
+                        📝 View Raw JSON
+                      </summary>
+                      <pre className="mt-2 text-xs font-mono whitespace-pre-wrap bg-gray-900 text-green-400 p-4 rounded border overflow-x-auto">
+                        {JSON.stringify(currentEntry.aiResults[0].custom_extractor_data, null, 2)}
+                      </pre>
+                    </details>
                   </div>
                 )}
               </div>

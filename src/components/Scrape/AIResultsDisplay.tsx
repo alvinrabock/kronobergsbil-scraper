@@ -58,6 +58,11 @@ export function AIResultsDisplay({ results, isProcessing }: AIResultsDisplayProp
         totalTokens += result.token_usage.total_tokens || 0;
       }
 
+      // FALLBACK: Also check claude_pdf_costs for tokens (older sessions before fix)
+      if (result.claude_pdf_costs && (!result.token_usage || result.token_usage.total_tokens === 0)) {
+        totalTokens += (result.claude_pdf_costs.total_input_tokens || 0) + (result.claude_pdf_costs.total_output_tokens || 0);
+      }
+
       // Track Google OCR costs separately (page-based, not token-based)
       if (result.google_ocr_costs) {
         googleOcrCost += result.google_ocr_costs.total_cost_usd || 0;
@@ -71,6 +76,11 @@ export function AIResultsDisplay({ results, isProcessing }: AIResultsDisplayProp
         // Subtract OCR cost to get Claude-only cost
         const ocrCostInResult = result.google_ocr_costs?.total_cost_usd || 0;
         claudeCost += result.total_estimated_cost_usd - ocrCostInResult;
+      } else if (result.claude_pdf_costs?.total_cost_usd) {
+        // Fallback to claude_pdf_costs for older sessions
+        const cost = result.claude_pdf_costs.total_cost_usd;
+        totalCost += cost;
+        claudeCost += cost;
       } else if (result.token_usage?.estimated_cost_usd) {
         // Fallback to token_usage cost if total not available
         const cost = result.token_usage.estimated_cost_usd;
@@ -158,14 +168,15 @@ export function AIResultsDisplay({ results, isProcessing }: AIResultsDisplayProp
   }
 
   // Helper function to safely copy JSON to clipboard
+  // Always use the converted data (with new schema - variants instead of vehicle_models)
   const handleCopyJson = async (): Promise<void> => {
     try {
-      const jsonData = JSON.stringify(currentResult?.raw_analysis || {
+      const jsonData = JSON.stringify({
         campaigns: allCampaigns,
         cars: allCars,
         transport_cars: allTransportCars
       }, null, 2);
-      
+
       await navigator.clipboard.writeText(jsonData);
     } catch (error) {
       console.error('Failed to copy to clipboard:', error);
@@ -449,10 +460,10 @@ export function AIResultsDisplay({ results, isProcessing }: AIResultsDisplayProp
           <div className="p-6 h-full overflow-y-auto">
             <div className="bg-white rounded-lg border border-gray-200 h-full">
               <div className="border-b border-gray-200 px-4 py-3">
-                <h3 className="font-medium text-gray-900">Rådata (JSON)</h3>
+                <h3 className="font-medium text-gray-900">JSON Data (new schema with variants)</h3>
               </div>
               <pre className="p-4 text-xs font-mono leading-relaxed whitespace-pre-wrap h-full overflow-auto text-gray-700">
-                {JSON.stringify(currentResult?.raw_analysis || {
+                {JSON.stringify({
                   campaigns: allCampaigns,
                   cars: allCars,
                   transport_cars: allTransportCars

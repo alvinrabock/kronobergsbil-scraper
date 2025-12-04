@@ -8,25 +8,40 @@ import {
     validateVehicleData,
     CampaignData,
     VehicleData,
+    VehicleVariant,
+    VehicleDimensions,
+    ColorOption,
+    InteriorOption,
+    VehicleOption,
+    VehicleAccessory,
+    VehicleService,
+    ConnectedServices,
+    FinancingInfo,
+    VehicleWarranty,
+    DealerInfo,
     truncateDescription,
     CampaignVehicleModel,
     VehicleModel as ExternalVehicleModel,
     TokenUsage as EnhancedTokenUsage,
-
     createTokenUsage
 } from './ai-processor-types';
 import {
     isClaudeEnabled,
     extractVehicleDataFromHTML,
-    extractVehicleDataFromPDF,
+    extractVehicleDataFromPDF as claudeExtractVehicleDataFromPDF,
     selectBestImageWithClaude,
+    ExtractedVehicle,
 } from './claude-client';
 import {
     extractPDFLinksFromHTML,
-    extractPDFText,
     categorizePDF,
     filterPricelistPDFs,
 } from './pdf-extractor';
+import {
+    extractPDFWithTwoTierSystem,
+    TwoTierExtractionResult,
+} from './pdf-two-tier-processor';
+import { isCustomExtractorEnabled } from './google-custom-extractor';
 
 // AI Provider configuration - Claude is now the primary provider
 const USE_CLAUDE = isClaudeEnabled();
@@ -90,6 +105,49 @@ function createClaudeTokenUsage(
 // Perplexity API configuration
 const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
 const PERPLEXITY_BASE_URL = 'https://api.perplexity.ai/chat/completions';
+
+// Helper functions for brand/model extraction from URL
+function extractBrandFromUrl(url: string): string | null {
+    const urlLower = url.toLowerCase();
+    const brands = [
+        'opel', 'peugeot', 'suzuki', 'honda', 'mazda', 'toyota',
+        'subaru', 'isuzu', 'mg', 'maxus', 'fiat'
+    ];
+
+    for (const brand of brands) {
+        if (urlLower.includes(brand)) {
+            return brand.charAt(0).toUpperCase() + brand.slice(1);
+        }
+    }
+    return null;
+}
+
+function extractModelFromUrl(url: string): string | null {
+    // Common car model patterns in URLs
+    const urlPath = new URL(url).pathname.toLowerCase();
+
+    // Try to extract model from path segments like /bilar/corsa or /models/cx-80
+    const segments = urlPath.split('/').filter(s => s.length > 0);
+
+    // Look for model-like segments (after "bilar", "models", "personbilar", etc.)
+    const modelIndicators = ['bilar', 'models', 'personbilar', 'transportbilar', 'fordon'];
+    for (let i = 0; i < segments.length - 1; i++) {
+        if (modelIndicators.includes(segments[i]) && segments[i + 1]) {
+            // Capitalize and return the next segment
+            const model = segments[i + 1].replace(/-/g, ' ');
+            return model.charAt(0).toUpperCase() + model.slice(1);
+        }
+    }
+
+    // Fall back to last non-empty segment that looks like a model name
+    const lastSegment = segments[segments.length - 1];
+    if (lastSegment && lastSegment.length > 2 && !lastSegment.includes('.')) {
+        const model = lastSegment.replace(/-/g, ' ');
+        return model.charAt(0).toUpperCase() + model.slice(1);
+    }
+
+    return null;
+}
 
 // Enhanced interfaces
 interface FactCheckResult {
@@ -193,6 +251,19 @@ interface Vehicle {
     body_type?: string;  // Body style: suv, sedan, kombi, halvkombi, cab, coupe, minibuss, pickup, etc.
     source_url?: string;  // URL of the page where this vehicle was found
     pdf_source_url?: string;  // URL of the PDF where pricing data was extracted
+
+    // NEW SCHEMA: Additional fields
+    variants?: VehicleVariant[];
+    dimensions?: VehicleDimensions | null;
+    colors?: ColorOption[];
+    interiors?: InteriorOption[];
+    options?: VehicleOption[];
+    accessories?: VehicleAccessory[];
+    services?: VehicleService[];
+    connected_services?: ConnectedServices | null;
+    financing?: FinancingInfo | null;
+    warranties?: VehicleWarranty[];
+    dealer_info?: DealerInfo | null;
 }
 
 interface Campaign {
@@ -602,6 +673,256 @@ JSON ONLY - NO OTHER TEXT:`;
     }
 }
 
+// PDF-based fact-checking - validates extracted data against PDF source
+interface VariantDuplicatePair {
+    vehicle: string;
+    variant1: string;
+    variant2: string;
+    keep: string;      // Which variant name to keep (has more data)
+    discard: string;   // Which variant name to discard
+    reason: string;
+}
+
+interface PDFFactCheckResult {
+    success: boolean;
+    duplicate_vehicles: {
+        found: boolean;
+        details: string[];
+        suggested_merges: Array<{ vehicle1: string; vehicle2: string; reason: string }>;
+    };
+    duplicate_variants: {
+        found: boolean;
+        pairs: VariantDuplicatePair[];  // Specific duplicate pairs with reasons
+        details: string[];
+        affected_vehicles: string[];
+    };
+    missing_data: {
+        found: boolean;
+        details: Array<{
+            vehicle: string;
+            variant?: string;
+            field: string;
+            expected_value?: string;
+            severity: 'critical' | 'warning' | 'minor';
+        }>;
+    };
+    accuracy_score: number;
+    summary: string;
+    token_usage?: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+    };
+}
+
+export async function factCheckPDFExtraction(
+    extractedVehicles: VehicleData[],
+    pdfUrl: string
+): Promise<PDFFactCheckResult> {
+    try {
+        console.log(`🔍 [PDF Fact-Check] Validating ${extractedVehicles.length} vehicles from ${pdfUrl}`);
+
+        // Build a summary of extracted data for validation
+        const extractedSummary = extractedVehicles.map(v => ({
+            title: v.title,
+            brand: v.brand,
+            variants: (v.vehicle_model || []).map(m => ({
+                name: m.name,
+                price: m.price,
+                privatleasing: m.privatleasing,
+                fuel_type: m.bransle,
+                transmission: m.vaxellada,
+                equipment_count: (m.utrustning || []).length,
+                has_specs: !!m.specs
+            }))
+        }));
+
+        // Create a detailed list with data richness info for duplicate detection
+        const variantDetailsForAnalysis = extractedVehicles.map(v => ({
+            vehicle: v.title,
+            variants: (v.vehicle_model || []).map(m => ({
+                name: m.name,
+                has_price: !!(m.price && m.price > 0),
+                has_privatleasing: !!(m.privatleasing && m.privatleasing > 0),
+                equipment_count: (m.utrustning || []).length,
+                has_specs: !!m.specs && Object.keys(m.specs || {}).length > 0,
+                has_fuel_type: !!m.bransle,
+                has_transmission: !!m.vaxellada
+            }))
+        }));
+
+        const prompt = `CRITICAL: Respond with ONLY valid JSON. No explanations or markdown.
+
+You are validating vehicle data extracted from a Swedish car dealership PDF pricelist.
+Your PRIMARY task is to detect DUPLICATE VARIANTS by analyzing variant names.
+IMPORTANT: When duplicates are found, identify which one has MORE DATA to keep.
+
+PDF SOURCE URL: ${pdfUrl}
+
+EXTRACTED DATA TO VALIDATE (with data richness info):
+${JSON.stringify(extractedSummary, null, 2)}
+
+=== VARIANT DETAILS FOR DUPLICATE ANALYSIS ===
+${JSON.stringify(variantDetailsForAnalysis, null, 2)}
+
+=== VARIANT DUPLICATION RULES (CRITICAL) ===
+
+Analyze each vehicle's variants and find duplicates. Two variants are DUPLICATES if:
+
+1. SAME POWER + TRANSMISSION with different formatting:
+   - "Elektrisk 100kW" vs "Elektrisk 100kW Steglös Automat" → DUPLICATE (same 100kW, "Steglös Automat" is just transmission detail)
+   - "PureTech 100 hk Manuell" vs "PureTech 100 hk Manuell 6-steg" → DUPLICATE (6-steg is extra detail)
+   - "Style Hybrid AUT" vs "Style Hybrid 110 hk AUT" → DUPLICATE (AUT vs 110 hk AUT same variant)
+
+2. TRIM LEVEL variations with same engine:
+   - "Corsa Elektrisk 100kW" vs "Corsa GS Elektrisk 100kW" → NOT duplicate (GS is different trim)
+   - "208 Style 100 hk" vs "208 Active 100 hk" → NOT duplicate (different trims)
+
+3. Common Swedish transmission terms to normalize:
+   - "Steglös", "Steglös Automat", "CVT" = same transmission (auto)
+   - "e-DCT", "DCT", "AUT", "Automat" = same transmission (auto)
+   - "Manuell", "6-steg", "5-steg" = same transmission (manual)
+
+4. Power notation variations:
+   - "100kW" vs "100 kW" vs "100kw" = same power
+   - "100 hk" vs "100hk" vs "100hp" = same power
+
+=== DATA RICHNESS - WHICH TO KEEP ===
+
+For each duplicate pair, check which variant has MORE DATA:
+- More equipment (equipment_count)
+- Has price/privatleasing
+- Has specs
+- Has fuel_type and transmission
+
+The variant with MORE data should be kept. Set "keep" to that variant name.
+
+=== OTHER CHECKS ===
+
+1. DUPLICATE VEHICLES:
+   - "e-208" and "208" should be ONE vehicle
+   - "e-Corsa" and "Corsa" should be merged
+
+2. MISSING DATA:
+   - Variants without prices
+   - Variants without equipment (equipment_count = 0)
+   - Missing fuel type or transmission
+
+Return ONLY this JSON:
+{
+  "duplicate_vehicles": {
+    "found": true/false,
+    "details": ["e-208 and 208 are separate but should be one vehicle"],
+    "suggested_merges": [{"vehicle1": "e-208", "vehicle2": "208", "reason": "Same model, different powertrains"}]
+  },
+  "duplicate_variants": {
+    "found": true/false,
+    "pairs": [
+      {
+        "vehicle": "Corsa",
+        "variant1": "Elektrisk 100kW Steglös Automat",
+        "variant2": "Elektrisk 100kW",
+        "keep": "Elektrisk 100kW",
+        "discard": "Elektrisk 100kW Steglös Automat",
+        "reason": "Same 100kW power - variant2 has 15 equipment items, variant1 has 0"
+      },
+      {
+        "vehicle": "208",
+        "variant1": "Style Hybrid AUT",
+        "variant2": "Style Hybrid 110 hk AUT",
+        "keep": "Style Hybrid 110 hk AUT",
+        "discard": "Style Hybrid AUT",
+        "reason": "Same variant - variant2 has more specific name and equipment"
+      }
+    ],
+    "details": ["Summary of duplicate issues"],
+    "affected_vehicles": ["Corsa", "208"]
+  },
+  "missing_data": {
+    "found": true/false,
+    "details": [
+      {"vehicle": "208", "variant": "Style PureTech 100", "field": "equipment", "severity": "warning"}
+    ]
+  },
+  "accuracy_score": 85,
+  "summary": "Brief 1-2 sentence assessment focusing on duplicate variants found"
+}`;
+
+        const response = await callPerplexityAPI([
+            {
+                role: 'system',
+                content: 'You are a JSON-only validation system for Swedish vehicle data. Return ONLY valid JSON.'
+            },
+            {
+                role: 'user',
+                content: prompt
+            }
+        ]);
+
+        const content = response.choices?.[0]?.message?.content;
+        if (!content) {
+            throw new Error('No content in Perplexity response');
+        }
+
+        console.log(`📝 [PDF Fact-Check] Response length: ${content.length}`);
+
+        const result = parseJsonResponse(content);
+
+        const factCheckResult: PDFFactCheckResult = {
+            success: true,
+            duplicate_vehicles: {
+                found: result.duplicate_vehicles?.found || false,
+                details: result.duplicate_vehicles?.details || [],
+                suggested_merges: result.duplicate_vehicles?.suggested_merges || []
+            },
+            duplicate_variants: {
+                found: result.duplicate_variants?.found || false,
+                pairs: result.duplicate_variants?.pairs || [],
+                details: result.duplicate_variants?.details || [],
+                affected_vehicles: result.duplicate_variants?.affected_vehicles || []
+            },
+            missing_data: {
+                found: result.missing_data?.found || false,
+                details: result.missing_data?.details || []
+            },
+            accuracy_score: result.accuracy_score || 0,
+            summary: result.summary || 'Validation complete',
+            token_usage: response.usage ? {
+                prompt_tokens: response.usage.prompt_tokens,
+                completion_tokens: response.usage.completion_tokens,
+                total_tokens: response.usage.total_tokens
+            } : undefined
+        };
+
+        // Log findings
+        if (factCheckResult.duplicate_vehicles.found) {
+            console.log(`⚠️ [PDF Fact-Check] Duplicate vehicles found:`, factCheckResult.duplicate_vehicles.details);
+        }
+        if (factCheckResult.duplicate_variants.found) {
+            console.log(`⚠️ [PDF Fact-Check] Duplicate variants found: ${factCheckResult.duplicate_variants.pairs.length} pairs`);
+            for (const pair of factCheckResult.duplicate_variants.pairs) {
+                console.log(`   🔗 ${pair.vehicle}: KEEP "${pair.keep}" | DISCARD "${pair.discard}" - ${pair.reason}`);
+            }
+        }
+        if (factCheckResult.missing_data.found) {
+            console.log(`⚠️ [PDF Fact-Check] Missing data found:`, factCheckResult.missing_data.details.length, 'issues');
+        }
+        console.log(`✅ [PDF Fact-Check] Accuracy score: ${factCheckResult.accuracy_score}%`);
+
+        return factCheckResult;
+
+    } catch (error) {
+        console.error('❌ [PDF Fact-Check] Failed:', error);
+        return {
+            success: false,
+            duplicate_vehicles: { found: false, details: [], suggested_merges: [] },
+            duplicate_variants: { found: false, pairs: [], details: [], affected_vehicles: [] },
+            missing_data: { found: false, details: [] },
+            accuracy_score: 0,
+            summary: `Fact-checking failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+        };
+    }
+}
 
 // Apply suggested fixes function
 function applySuggestedFixes(
@@ -699,18 +1020,53 @@ function shouldMergeVehicles(existing: Vehicle, duplicate: Vehicle): boolean {
     // Check if they're the same base vehicle
     if (existingKey === duplicateKey) return true;
 
+    // Must be same brand to merge
+    if (existing.brand !== duplicate.brand) return false;
+
+    // Normalize titles by removing brand prefix if present
+    // This handles cases like "Corsa" vs "Opel Corsa" where both have brand="Opel"
+    const brand = existing.brand?.toLowerCase() || '';
+    const existingTitle = existing.title.toLowerCase()
+        .replace(new RegExp(`^${brand}\\s+`, 'i'), '')
+        .trim();
+    const duplicateTitle = duplicate.title.toLowerCase()
+        .replace(new RegExp(`^${brand}\\s+`, 'i'), '')
+        .trim();
+
+    // After removing brand prefix, if titles are identical
+    if (existingTitle === duplicateTitle) return true;
+
+    // Check if one title is contained in the other (e.g., "208" vs "208 GTi")
+    // BUT exclude cases where one has a prefix that indicates a different model variant
+    // e.g., "e VITARA" vs "VITARA" should NOT merge (electric vs hybrid are different models)
+    const electricPrefixes = ['e ', 'e-', 'i-', 'id.', 'id ', 'eq ', 'ev '];
+    const hasElectricPrefix = (title: string) => electricPrefixes.some(p => title.startsWith(p));
+
+    // Don't merge if one has electric prefix and the other doesn't
+    if (hasElectricPrefix(existingTitle) !== hasElectricPrefix(duplicateTitle)) {
+        return false;
+    }
+
+    if (existingTitle.includes(duplicateTitle) || duplicateTitle.includes(existingTitle)) {
+        return true;
+    }
+
     // Check for partial matches (e.g., "Honda Jazz" vs "Honda Jazz Hybrid")
-    const existingWords = existing.title.toLowerCase().split(/\s+/);
-    const duplicateWords = duplicate.title.toLowerCase().split(/\s+/);
+    const existingWords = existingTitle.split(/\s+/);
+    const duplicateWords = duplicateTitle.split(/\s+/);
 
     // If one title is contained within another (accounting for common additions)
     const commonWords = existingWords.filter(word =>
         duplicateWords.includes(word) &&
-        !['hybrid', 'e:hev', 'nya', 'new', '2024', '2025'].includes(word)
+        word.length > 1 && // Skip single-char words
+        !['hybrid', 'e:hev', 'nya', 'new', '2024', '2025', 'electric', 'elektrisk'].includes(word)
     );
 
-    // If they share significant common words and same brand
-    return existing.brand === duplicate.brand && commonWords.length >= 2;
+    // For short titles (1-2 words), require at least 1 significant common word
+    // For longer titles, require at least 2 common words
+    const minCommonWords = Math.min(existingWords.length, duplicateWords.length) <= 2 ? 1 : 2;
+
+    return commonWords.length >= minCommonWords;
 }
 
 function generateCampaignKey(campaign: Campaign): string {
@@ -765,7 +1121,7 @@ function intelligentMergeVehicles(existing: Vehicle, duplicate: Vehicle): Vehicl
         merged.free_text = duplicate.free_text;
     }
 
-    // Vehicle models: Intelligent merging
+    // Vehicle models: Intelligent merging (legacy)
     if (duplicate.vehicle_model && Array.isArray(duplicate.vehicle_model)) {
         const existingModels = merged.vehicle_model || [];
         const duplicateModels = duplicate.vehicle_model;
@@ -795,6 +1151,82 @@ function intelligentMergeVehicles(existing: Vehicle, duplicate: Vehicle): Vehicl
         });
 
         merged.vehicle_model = Array.from(modelMap.values());
+    }
+
+    // NEW SCHEMA: Merge variants array
+    if (duplicate.variants && Array.isArray(duplicate.variants) && duplicate.variants.length > 0) {
+        const existingVariants = merged.variants || [];
+        const variantMap = new Map<string, VehicleVariant>();
+
+        // Add existing variants
+        existingVariants.forEach(v => {
+            variantMap.set(v.name.toLowerCase(), v);
+        });
+
+        // Merge or add duplicate variants
+        duplicate.variants.forEach(v => {
+            const key = v.name.toLowerCase();
+            if (variantMap.has(key)) {
+                // Merge: prefer non-null values
+                const existing = variantMap.get(key)!;
+                variantMap.set(key, {
+                    ...existing,
+                    price: v.price ?? existing.price,
+                    privatleasing: v.privatleasing ?? existing.privatleasing,
+                    company_leasing: v.company_leasing ?? existing.company_leasing,
+                    loan_price: v.loan_price ?? existing.loan_price,
+                    fuel_type: v.fuel_type ?? existing.fuel_type,
+                    transmission: v.transmission ?? existing.transmission,
+                    specs: v.specs ?? existing.specs,
+                    equipment: (v.equipment?.length ?? 0) > (existing.equipment?.length ?? 0) ? v.equipment : existing.equipment,
+                });
+            } else {
+                variantMap.set(key, v);
+            }
+        });
+
+        merged.variants = Array.from(variantMap.values());
+    }
+
+    // NEW SCHEMA: Merge additional extracted data (prefer non-empty arrays)
+    if (!merged.dimensions && duplicate.dimensions) {
+        merged.dimensions = duplicate.dimensions;
+    }
+
+    if ((duplicate.colors?.length ?? 0) > (merged.colors?.length ?? 0)) {
+        merged.colors = duplicate.colors;
+    }
+
+    if ((duplicate.interiors?.length ?? 0) > (merged.interiors?.length ?? 0)) {
+        merged.interiors = duplicate.interiors;
+    }
+
+    if ((duplicate.options?.length ?? 0) > (merged.options?.length ?? 0)) {
+        merged.options = duplicate.options;
+    }
+
+    if ((duplicate.accessories?.length ?? 0) > (merged.accessories?.length ?? 0)) {
+        merged.accessories = duplicate.accessories;
+    }
+
+    if ((duplicate.services?.length ?? 0) > (merged.services?.length ?? 0)) {
+        merged.services = duplicate.services;
+    }
+
+    if ((duplicate.warranties?.length ?? 0) > (merged.warranties?.length ?? 0)) {
+        merged.warranties = duplicate.warranties;
+    }
+
+    if (!merged.connected_services && duplicate.connected_services) {
+        merged.connected_services = duplicate.connected_services;
+    }
+
+    if (!merged.financing && duplicate.financing) {
+        merged.financing = duplicate.financing;
+    }
+
+    if (!merged.dealer_info && duplicate.dealer_info) {
+        merged.dealer_info = duplicate.dealer_info;
     }
 
     return merged;
@@ -1789,10 +2221,16 @@ CRITICAL - PDF PRICELIST DATA:
 PDF TABLE STRUCTURE RECOGNITION:
 - Swedish car pricelists follow a TABLE format with columns like:
   * MODELL (model/variant name with technical specs)
-  * Rek.cirkapris / Kontantpris (purchase price in kr)
-  * Billån/mån (loan monthly payment)
-  * PL/mån or Privatleasing/mån (private leasing monthly)
+  * Rek.cirkapris / Kontantpris (purchase price in kr) → maps to "price" field
+  * Billån/mån* (loan monthly payment) → maps to "loan_price" field
+  * PL/mån** or Privatleasing/mån (private leasing monthly) → maps to "privatleasing" field (CRITICAL!)
   * Sometimes: Elförbrukning, Räckvidd, Skatt, CO2, etc.
+
+COLUMN TO FIELD MAPPING (CRITICAL - DO NOT MIX UP!):
+- "Rek.cirkapris" / "Kontantpris" → price (purchase price)
+- "Billån/mån" / "Billån" → loan_price (monthly loan payment)
+- "PL/mån" / "Privatleasing" → privatleasing (monthly private leasing - ALWAYS extract this!)
+- Campaign format "(ord. pris X kr)" → old_price, old_loan_price, old_privatleasing respectively
 
 HOW TO IDENTIFY VARIANTS vs SECTION HEADERS:
 - SECTION HEADERS: Text in ALL CAPS or bold with equipment level names (BASE, SELECT, INCLUSIVE, STYLE, COMFORT) but NO technical specs and NO prices
@@ -2028,9 +2466,10 @@ async function processHtmlBatch(
     }
 
     // Convert Claude's vehicle format to internal format
+    // Now supports both new schema (variants) and legacy (vehicleModels)
     const extractedVehicles = claudeResult.vehicles || [];
     const convertedData: (Vehicle | Campaign)[] = extractedVehicles.map(v => ({
-        title: v.name,
+        title: v.title || v.name,
         brand: v.brand,
         thumbnail: v.thumbnail,
         description: v.description,
@@ -2038,6 +2477,21 @@ async function processHtmlBatch(
         body_type: v.body_type || v.bodyType,
         source_url: v.source_url || v.sourceUrl || sourceUrl,
         free_text: v.free_text || v.freeText || '',
+
+        // NEW SCHEMA: Preserve all extracted data
+        variants: v.variants || [],
+        dimensions: v.dimensions ?? null,
+        colors: v.colors || [],
+        interiors: v.interiors || [],
+        options: v.options || [],
+        accessories: v.accessories || [],
+        services: v.services || [],
+        connected_services: v.connected_services ?? null,
+        financing: v.financing ?? null,
+        warranties: v.warranties || [],
+        dealer_info: v.dealer_info ?? null,
+
+        // LEGACY: vehicle_model for backward compatibility
         vehicle_model: v.vehicleModels?.map(m => ({
             name: m.name,
             price: m.price,
@@ -2141,15 +2595,165 @@ function convertCampaignToCampaignData(campaign: Campaign): CampaignData {
     };
 }
 
-function convertVehicleToVehicleData(vehicle: Vehicle): VehicleData {
+/**
+ * Convert PDF-extracted vehicle (from Claude) to VehicleData format (NEW SCHEMA)
+ * This is used in the PDF-PRIMARY flow where PDFs are the main data source
+ */
+function convertExtractedVehicleToVehicleData(
+    vehicle: ExtractedVehicle,
+    sourceUrl: string,
+    availableImages: string[]
+): VehicleData {
+    // Try to find a matching image from HTML based on vehicle/brand name
+    let thumbnail = vehicle.thumbnail || null;
+    if (!thumbnail && availableImages.length > 0) {
+        // Try to match image by brand or vehicle name
+        const searchTerms = [
+            vehicle.brand?.toLowerCase(),
+            vehicle.title?.toLowerCase(),
+            vehicle.title?.split(' ')[0]?.toLowerCase()
+        ].filter(Boolean);
+
+        for (const term of searchTerms) {
+            const matchedImage = availableImages.find(img =>
+                img.toLowerCase().includes(term as string)
+            );
+            if (matchedImage) {
+                thumbnail = matchedImage;
+                break;
+            }
+        }
+
+        // Fallback to first image if no match found
+        if (!thumbnail) {
+            thumbnail = availableImages[0] || null;
+        }
+    }
+
+    // Convert variants to new schema format
+    const variants: VehicleVariant[] = (vehicle.variants || []).map(v => ({
+        name: v.name,
+        price: v.price ?? null,
+        old_price: v.old_price ?? null,
+        privatleasing: v.privatleasing ?? null,
+        old_privatleasing: v.old_privatleasing ?? null,
+        company_leasing: v.company_leasing ?? null,
+        old_company_leasing: v.old_company_leasing ?? null,
+        loan_price: v.loan_price ?? null,
+        old_loan_price: v.old_loan_price ?? null,
+        fuel_type: v.fuel_type as VehicleVariant['fuel_type'] ?? null,
+        transmission: v.transmission as VehicleVariant['transmission'] ?? null,
+        thumbnail: v.thumbnail ?? null,
+        specs: v.specs ?? null,
+        equipment: v.equipment ?? []
+    }));
+
     return {
-        title: vehicle.title,
+        id: undefined,  // Will be assigned by database
         brand: vehicle.brand,
+        title: vehicle.title,
         description: truncateDescription(vehicle.description || ''),
-        thumbnail: vehicle.thumbnail || '',
-        vehicle_model: (vehicle.vehicle_model || []).map(convertToExternalVehicleModel),
-        free_text: vehicle.free_text || '',
+        thumbnail,
+        vehicle_type: vehicle.vehicle_type ?? 'cars',
+        body_type: vehicle.body_type ?? null,
+        source_url: sourceUrl,
+        updated_at: new Date().toISOString(),
+
+        // Variants (new schema)
+        variants,
+        variant_count: variants.length,
+
+        // Additional data from PDF
+        dimensions: vehicle.dimensions ?? null,
+        colors: vehicle.colors ?? [],
+        interiors: vehicle.interiors ?? [],
+        options: vehicle.options ?? [],
+        accessories: vehicle.accessories ?? [],
+        services: vehicle.services ?? [],
+        connected_services: vehicle.connected_services ?? null,
+        financing: vehicle.financing ?? null,
+        warranties: vehicle.warranties ?? [],
+        dealer_info: vehicle.dealer_info ?? null,
+
+        // Legacy compatibility
+        free_text: vehicle.freeText || '',
+        pdf_source_url: vehicle.source_url || undefined
+    };
+}
+
+function convertVehicleToVehicleData(vehicle: Vehicle): VehicleData {
+    // Use new schema variants if available, otherwise convert from legacy vehicle_model
+    let variants: VehicleVariant[] = [];
+
+    // Check if vehicle has new schema variants
+    if ((vehicle as any).variants && Array.isArray((vehicle as any).variants) && (vehicle as any).variants.length > 0) {
+        variants = (vehicle as any).variants.map((v: any) => ({
+            name: v.name,
+            price: v.price ?? null,
+            old_price: v.old_price ?? null,
+            privatleasing: v.privatleasing ?? null,
+            old_privatleasing: v.old_privatleasing ?? null,
+            company_leasing: v.company_leasing ?? null,
+            old_company_leasing: v.old_company_leasing ?? null,
+            loan_price: v.loan_price ?? null,
+            old_loan_price: v.old_loan_price ?? null,
+            fuel_type: v.fuel_type ?? null,
+            transmission: v.transmission ?? null,
+            thumbnail: v.thumbnail ?? null,
+            specs: v.specs ?? null,
+            equipment: v.equipment || []
+        }));
+    }
+    // Fallback: Convert from legacy vehicle_model
+    else if (vehicle.vehicle_model && vehicle.vehicle_model.length > 0) {
+        variants = vehicle.vehicle_model.map(m => ({
+            name: m.name,
+            price: m.price ?? null,
+            old_price: m.old_price ?? null,
+            privatleasing: m.privatleasing || extractFinancingPrice(m.financing_options?.privatleasing) || null,
+            old_privatleasing: m.old_privatleasing ?? null,
+            company_leasing: m.company_leasing_price || extractFinancingPrice(m.financing_options?.company_leasing) || null,
+            old_company_leasing: m.old_company_leasing_price ?? null,
+            loan_price: m.loan_price || extractFinancingPrice(m.financing_options?.loan) || null,
+            old_loan_price: m.old_loan_price ?? null,
+            fuel_type: (m.bransle as VehicleVariant['fuel_type']) ?? null,
+            transmission: (m.vaxellada as VehicleVariant['transmission']) ?? null,
+            thumbnail: m.thumbnail ?? null,
+            equipment: m.utrustning ?? []
+        }));
+    }
+
+    // Cast vehicle to any to access new schema fields that may exist
+    const v = vehicle as any;
+
+    return {
+        brand: vehicle.brand,
+        title: vehicle.title,
+        description: truncateDescription(vehicle.description || ''),
+        thumbnail: vehicle.thumbnail || null,
+        vehicle_type: v.vehicle_type || 'cars',
+        body_type: v.body_type ?? null,
         source_url: vehicle.source_url,
+        updated_at: new Date().toISOString(),
+
+        // New schema: variants
+        variants,
+        variant_count: variants.length,
+
+        // NEW SCHEMA: Additional extracted data (preserve if available)
+        dimensions: v.dimensions ?? null,
+        colors: Array.isArray(v.colors) ? v.colors : [],
+        interiors: Array.isArray(v.interiors) ? v.interiors : [],
+        options: Array.isArray(v.options) ? v.options : [],
+        accessories: Array.isArray(v.accessories) ? v.accessories : [],
+        services: Array.isArray(v.services) ? v.services : [],
+        connected_services: v.connected_services ?? null,
+        financing: v.financing ?? null,
+        warranties: Array.isArray(v.warranties) ? v.warranties : [],
+        dealer_info: v.dealer_info ?? null,
+
+        // Legacy fields
+        free_text: vehicle.free_text || '',
         pdf_source_url: vehicle.pdf_source_url
     };
 }
@@ -2176,12 +2780,25 @@ export async function processHtmlWithAI(
 
         contentType = detectContentType(htmlContent, sourceUrl, category) as ContentType;
 
-        // Parse HTML content and extract linked pages
+        // Parse HTML content and extract main page + linked pages
+        let batchesToProcess: string[] = [];
+
+        // FIRST: Extract main page content (always process this!)
+        const mainPageMatch = htmlContent.match(/<!-- MAIN PAGE CONTENT START -->([\s\S]*?)<!-- MAIN PAGE CONTENT END -->/);
+        if (mainPageMatch && mainPageMatch[1]) {
+            const mainPageContent = mainPageMatch[1].trim();
+            const cleanMainContent = mainPageContent.replace(/<!--.*?-->/g, '').trim();
+            if (cleanMainContent.length > 100) {
+                console.log(`📄 Found main page content: ${mainPageContent.length} chars`);
+                batchesToProcess.push(mainPageContent);
+            }
+        }
+
+        // SECOND: Extract linked pages
         const linkedContentStartDelimiter = '<!-- LINKED CONTENT START';
         const linkedPageDelimiter = /<!-- LINKED PAGE \d+ START -->/;
 
         const linkedContentStartIndex = htmlContent.indexOf(linkedContentStartDelimiter);
-        let batchesToProcess: string[] = [];
 
         if (linkedContentStartIndex !== -1) {
             const linkedContentSection = htmlContent.substring(linkedContentStartIndex);
@@ -2211,7 +2828,7 @@ export async function processHtmlWithAI(
             });
 
             console.log(`Found ${linkedPages.length} linked pages with substantial content`);
-            batchesToProcess = linkedPages;
+            batchesToProcess.push(...linkedPages);
         } else {
             console.log('No linked content start delimiter found - checking for legacy format');
 
@@ -2233,14 +2850,13 @@ export async function processHtmlWithAI(
                 });
 
                 console.log(`Found ${linkedPages.length} linked pages using legacy format`);
-                batchesToProcess = linkedPages;
+                batchesToProcess.push(...linkedPages);
             } else {
-                console.log('No linked content found - this means no linked pages were scraped');
-                batchesToProcess = [];
+                console.log('No linked pages found - will process main page content only');
             }
         }
 
-        console.log(`Processing ${batchesToProcess.length} batches`);
+        console.log(`Processing ${batchesToProcess.length} batches total`);
 
         // TEST MODE: Limit batches to speed up testing
         const testMode = process.env.TEST_MODE === 'true';
@@ -2251,16 +2867,23 @@ export async function processHtmlWithAI(
         }
 
         if (batchesToProcess.length === 0) {
-            console.log('No content batches to process');
-            return {
-                success: true,
-                content_type: contentType,
-                source_url: sourceUrl,
-                processed_at: new Date().toISOString(),
-                raw_analysis: { [contentType]: [] },
-                data: [],
-                token_usage: totalTokenUsage,
-            };
+            // Last resort: try to process the raw HTML content if no delimiters found
+            const rawContent = htmlContent.replace(/<!--.*?-->/g, '').trim();
+            if (rawContent.length > 100) {
+                console.log(`⚠️ No delimited content found - processing raw HTML (${rawContent.length} chars)`);
+                batchesToProcess = [htmlContent];
+            } else {
+                console.log('No content batches to process');
+                return {
+                    success: true,
+                    content_type: contentType,
+                    source_url: sourceUrl,
+                    processed_at: new Date().toISOString(),
+                    raw_analysis: { [contentType]: [] },
+                    data: [],
+                    token_usage: totalTokenUsage,
+                };
+            }
         }
 
         // Process batches SEQUENTIALLY to avoid Claude rate limits (10k tokens/min)
@@ -2302,13 +2925,12 @@ export async function processHtmlWithAI(
         console.log(`✅ Post-deduplication: ${allExtractedData.length} items`);
         console.log('✅ Post-deduplication items:', allExtractedData.map(item => item.title));
 
-        // TEST MODE: Limit vehicles for faster testing
-        if (testMode) {
-            const maxVehicles = parseInt(process.env.MAX_VEHICLES_PER_BATCH || '2', 10);
-            if (allExtractedData.length > maxVehicles) {
-                console.log(`🧪 TEST MODE: Limiting to ${maxVehicles} vehicles (was ${allExtractedData.length})`);
-                allExtractedData = allExtractedData.slice(0, maxVehicles);
-            }
+        // Safety limit: Always apply MAX_VEHICLES_PER_BATCH to prevent runaway costs
+        // In test mode uses smaller limit, in production uses larger safety limit
+        const maxVehicles = parseInt(process.env.MAX_VEHICLES_PER_BATCH || '50', 10);
+        if (allExtractedData.length > maxVehicles) {
+            console.log(`⚠️ SAFETY LIMIT: Limiting to ${maxVehicles} vehicles (was ${allExtractedData.length})`);
+            allExtractedData = allExtractedData.slice(0, maxVehicles);
         }
 
         allExtractedData = resolveImageUrls(allExtractedData, sourceUrl);
@@ -2571,6 +3193,9 @@ export async function processHtmlWithValidation(
     return result;
 }
 
+// Progress callback type for streaming updates
+export type ProgressCallback = (step: string, message: string, data?: Record<string, any>) => void;
+
 // SMART FACT-CHECKING WRAPPER - AUTOMATICALLY DECIDES WHEN TO FACT-CHECK
 export async function processHtmlWithSmartFactCheck(
     htmlContent: string,
@@ -2583,7 +3208,8 @@ export async function processHtmlWithSmartFactCheck(
         description?: string;
         label?: string;
     },
-    scraperPdfLinks?: { url: string; type: string; foundOnPage: string }[]  // PDF links from scraper
+    scraperPdfLinks?: { url: string; type: string; foundOnPage: string }[],  // PDF links from scraper
+    onProgress?: ProgressCallback  // Optional callback for streaming progress updates
 ): Promise<EnhancedProcessedResult> {
     // Smart decision logic for enabling fact-checking
     const shouldFactCheck =
@@ -2614,16 +3240,39 @@ export async function processHtmlWithSmartFactCheck(
     }
 
     // PDF Processing - Extract and process PDFs found in HTML
-    // Default to 10 PDFs to ensure all pricelists are processed (brochures are filtered out anyway)
-    const maxPdfsPerPage = parseInt(process.env.MAX_PDFS_PER_PAGE || '10', 10);
-    let pdfExtractedText = '';
+    // OPTIMIZED: Use Claude's native PDF vision to extract data directly (no OCR step)
+    // This is more cost-effective than Google OCR + Claude text analysis
+    // Test mode detection
+    const isTestMode = process.env.TEST_MODE === 'true';
 
-    // Track Google Document AI OCR costs
-    let googleOcrCosts = {
-        total_pages: 0,
+    // PDF limits - use test limits if in test mode
+    const maxPdfsPerPage = isTestMode
+        ? parseInt(process.env.TEST_MAX_PDFS || '2', 10)
+        : parseInt(process.env.MAX_PDFS_PER_PAGE || '20', 10);
+
+    // Safety limits to prevent runaway costs
+    const maxTotalPdfs = parseInt(process.env.MAX_TOTAL_PDFS || '100', 10);
+    const maxAiCostUsd = parseFloat(process.env.MAX_AI_COST_USD || '10.00');
+    let pdfExtractedText = '';  // Kept for backward compatibility, but not used in new flow
+
+    if (isTestMode) {
+        console.log(`🧪 TEST MODE: Limiting to ${maxPdfsPerPage} PDFs per page`);
+    }
+
+    // Track Claude PDF extraction costs (replaces Google OCR costs)
+    let claudePdfCosts = {
+        total_input_tokens: 0,
+        total_output_tokens: 0,
         total_cost_usd: 0,
         pdfs_processed: 0
     };
+
+    // Direct PDF extraction results - vehicles extracted directly from PDFs
+    let pdfExtractedVehicles: ExtractedVehicle[] = [];
+
+    // Two-tier extraction tracking (declared at outer scope for result attachment)
+    let twoTierResults: (TwoTierExtractionResult & { pdfUrl?: string })[] = [];
+    let customExtractorData: any = null;
 
     try {
         // Use scraper-provided PDF links if available (more reliable)
@@ -2653,14 +3302,33 @@ export async function processHtmlWithSmartFactCheck(
         if (pdfLinks.length > 0) {
             console.log(`📄 Processing ${pdfLinks.length} pricelist PDFs (up to ${maxPdfsPerPage})...`);
 
+            // Emit PDF extraction start event
+            onProgress?.('pdf_extraction_start', `Processing ${Math.min(pdfLinks.length, maxPdfsPerPage)} PDF pricelists...`, {
+                totalPdfs: pdfLinks.length,
+                maxPdfs: maxPdfsPerPage
+            });
+
             // Process only pricelist PDFs (limited by MAX_PDFS_PER_PAGE)
             // Add delay between PDFs to avoid Claude rate limits (10k tokens/min on free tier)
             const pdfDelayMs = 3000; // 3 seconds between PDFs to stay under rate limit
 
+            // Base brand and model from metadata or source URL (fallback)
+            const baseBrand = metadata?.brand || extractBrandFromUrl(sourceUrl) || 'Unknown';
+            const baseModelName = metadata?.label || extractModelFromUrl(sourceUrl) || 'Unknown';
+
+            console.log(`🔧 Two-Tier PDF Processing: BaseBrand=${baseBrand}, BaseModel=${baseModelName}`);
+            console.log(`   Custom Extractor available: ${isCustomExtractorEnabled()}`);
+
             for (let i = 0; i < Math.min(pdfLinks.length, maxPdfsPerPage); i++) {
                 const pdfUrl = pdfLinks[i];
                 const pdfType = categorizePDF(pdfUrl);
+
+                // Extract brand and model from PDF URL itself (more reliable for multi-brand pages)
+                const pdfBrand = extractBrandFromUrl(pdfUrl) || baseBrand;
+                const pdfModel = extractModelFromUrl(pdfUrl) || baseModelName;
+
                 console.log(`📄 Processing ${pdfType} PDF (${i + 1}/${Math.min(pdfLinks.length, maxPdfsPerPage)}): ${pdfUrl}`);
+                console.log(`   PDF Brand: ${pdfBrand}, Model: ${pdfModel}`);
 
                 // Add delay between PDFs (not before the first one)
                 if (i > 0) {
@@ -2669,16 +3337,77 @@ export async function processHtmlWithSmartFactCheck(
                 }
 
                 try {
-                    const pdfResult = await extractPDFText(pdfUrl);
-                    if (pdfResult.success && pdfResult.text) {
-                        console.log(`✅ PDF extracted: ${pdfResult.text.length} chars via ${pdfResult.method}`);
-                        pdfExtractedText += `\n\n<!-- PDF CONTENT FROM: ${pdfUrl} (${pdfType}) -->\n${pdfResult.text}\n<!-- END PDF CONTENT -->`;
+                    // OPTIMIZED: Use Claude's native PDF vision for direct extraction
+                    // This is more cost-effective than Google OCR + Claude text analysis
+                    // Claude "sees" the PDF visually, reducing token count significantly
+                    console.log(`🚀 Using Claude native PDF extraction (cost-optimized)`);
 
-                        // Track Google OCR costs if used
-                        if (pdfResult.method === 'google-document-ai' && pdfResult.ocrCostUsd) {
-                            googleOcrCosts.total_pages += pdfResult.pageCount || 1;
-                            googleOcrCosts.total_cost_usd += pdfResult.ocrCostUsd;
-                            googleOcrCosts.pdfs_processed += 1;
+                    const pdfResult = await claudeExtractVehicleDataFromPDF(pdfUrl);
+
+                    if (pdfResult.success && pdfResult.vehicles && pdfResult.vehicles.length > 0) {
+                        // Track costs from Claude usage
+                        if (pdfResult.usage) {
+                            claudePdfCosts.total_input_tokens += pdfResult.usage.inputTokens;
+                            claudePdfCosts.total_output_tokens += pdfResult.usage.outputTokens;
+                            claudePdfCosts.total_cost_usd += pdfResult.usage.estimatedCostUsd;
+                            claudePdfCosts.pdfs_processed += 1;
+                        }
+
+                        // Store extracted vehicles for merging with HTML results
+                        const vehiclesWithSource = pdfResult.vehicles.map(v => ({
+                            ...v,
+                            source_url: pdfUrl,
+                            sourceUrl: pdfUrl,
+                            priceSource: 'pdf' as const
+                        }));
+                        pdfExtractedVehicles.push(...vehiclesWithSource);
+
+                        const totalVariants = pdfResult.vehicles.reduce((sum, v) => sum + (v.variants?.length || v.vehicleModels?.length || 0), 0);
+                        console.log(`✅ Claude PDF extraction: ${pdfResult.vehicles.length} vehicles, ${totalVariants} variants`);
+                        console.log(`   Cost: $${pdfResult.usage?.estimatedCostUsd.toFixed(4) || 'N/A'} (${pdfResult.usage?.inputTokens || 0} input + ${pdfResult.usage?.outputTokens || 0} output tokens)`);
+
+                        // Emit progress event
+                        onProgress?.('pdf_claude_extraction', `📄 Claude PDF: ${pdfBrand} ${pdfModel} - ${pdfResult.vehicles.length} vehicles, ${totalVariants} variants`, {
+                            method: 'claude-native-pdf',
+                            brand: pdfBrand,
+                            model: pdfModel,
+                            vehicles: pdfResult.vehicles.length,
+                            variants: totalVariants,
+                            cost: pdfResult.usage?.estimatedCostUsd || 0,
+                            inputTokens: pdfResult.usage?.inputTokens || 0,
+                            outputTokens: pdfResult.usage?.outputTokens || 0
+                        });
+
+                        // Safety limit: Check if cost limit exceeded
+                        if (claudePdfCosts.total_cost_usd >= maxAiCostUsd) {
+                            console.warn(`⚠️ SAFETY LIMIT: AI cost limit reached ($${claudePdfCosts.total_cost_usd.toFixed(2)} >= $${maxAiCostUsd}). Stopping PDF processing.`);
+                            break;
+                        }
+                        // Safety limit: Check if PDF count limit exceeded
+                        if (claudePdfCosts.pdfs_processed >= maxTotalPdfs) {
+                            console.warn(`⚠️ SAFETY LIMIT: Max PDF limit reached (${claudePdfCosts.pdfs_processed} >= ${maxTotalPdfs}). Stopping PDF processing.`);
+                            break;
+                        }
+                    } else {
+                        console.warn(`⚠️ Claude PDF extraction returned no vehicles: ${pdfResult.error || 'Unknown error'}`);
+
+                        // Fallback to Google OCR + text extraction if Claude fails
+                        // This is the old approach, kept as fallback
+                        if (isCustomExtractorEnabled() && pdfBrand !== 'Unknown') {
+                            console.log(`🔧 Fallback: Using Two-Tier PDF Processing for ${pdfBrand} ${pdfModel}`);
+
+                            const twoTierResult = await extractPDFWithTwoTierSystem(
+                                pdfUrl,
+                                pdfBrand,
+                                pdfModel,
+                                false
+                            );
+
+                            twoTierResults.push({ ...twoTierResult, pdfUrl } as TwoTierExtractionResult & { pdfUrl: string });
+
+                            if (twoTierResult.success && twoTierResult.priceOnlyText) {
+                                pdfExtractedText += `\n\n<!-- PDF CONTENT FROM: ${pdfUrl} (${pdfType}) [Fallback OCR] -->\n${twoTierResult.priceOnlyText}\n<!-- END PDF CONTENT -->`;
+                            }
                         }
                     }
                 } catch (pdfError) {
@@ -2686,38 +3415,160 @@ export async function processHtmlWithSmartFactCheck(
                 }
             }
 
-            if (pdfExtractedText) {
-                console.log(`📄 Total PDF text extracted: ${pdfExtractedText.length} characters`);
+            // Log extraction summary
+            if (pdfExtractedVehicles.length > 0) {
+                const totalVariants = pdfExtractedVehicles.reduce((sum, v) => sum + (v.variants?.length || v.vehicleModels?.length || 0), 0);
+                console.log(`📊 Claude Native PDF Extraction Summary:`);
+                console.log(`   - PDFs processed: ${claudePdfCosts.pdfs_processed}`);
+                console.log(`   - Vehicles extracted: ${pdfExtractedVehicles.length}`);
+                console.log(`   - Total variants: ${totalVariants}`);
+                console.log(`   - Total cost: $${claudePdfCosts.total_cost_usd.toFixed(4)}`);
+                console.log(`   - Total tokens: ${claudePdfCosts.total_input_tokens} input + ${claudePdfCosts.total_output_tokens} output`);
+
+                // Emit PDF extraction complete event with summary
+                onProgress?.('pdf_extraction_complete', `PDF extraction complete: ${pdfExtractedVehicles.length} vehicles, ${totalVariants} variants (cost: $${claudePdfCosts.total_cost_usd.toFixed(4)})`, {
+                    method: 'claude-native-pdf',
+                    vehiclesExtracted: pdfExtractedVehicles.length,
+                    variantsExtracted: totalVariants,
+                    totalCost: claudePdfCosts.total_cost_usd,
+                    pdfsProcessed: claudePdfCosts.pdfs_processed,
+                    inputTokens: claudePdfCosts.total_input_tokens,
+                    outputTokens: claudePdfCosts.total_output_tokens
+                });
             }
 
-            // Log Google OCR costs summary
-            if (googleOcrCosts.pdfs_processed > 0) {
-                console.log(`📊 Google Document AI OCR Summary:`);
-                console.log(`   - PDFs processed: ${googleOcrCosts.pdfs_processed}`);
-                console.log(`   - Total pages: ${googleOcrCosts.total_pages}`);
-                console.log(`   - Total cost: $${googleOcrCosts.total_cost_usd.toFixed(4)}`);
+            // Log fallback OCR results if any
+            if (twoTierResults.length > 0) {
+                const customCount = twoTierResults.filter(r => r.tier === 'custom').length;
+                const standardCount = twoTierResults.filter(r => r.tier === 'standard_ocr').length;
+                console.log(`📊 Fallback OCR Summary (used when Claude failed):`);
+                console.log(`   - Custom extractor: ${customCount}`);
+                console.log(`   - Standard OCR: ${standardCount}`);
             }
         }
     } catch (pdfError) {
         console.warn('⚠️ PDF extraction failed:', pdfError);
     }
 
-    // Pass PDF data separately so it can be included in each batch
-    const result = await processHtmlWithValidation(
-        htmlContent,
-        sourceUrl,
-        category,
-        enableImageAnalysis,
-        shouldFactCheck,
-        pdfExtractedText // Pass PDF text to be included in each batch
-    );
+    // NEW ARCHITECTURE: PDF vehicles are PRIMARY data source
+    // HTML is only used for images/links extraction (lightweight)
+    // DO NOT pass pdfExtractedText - that causes re-analysis of raw text
 
-    // Add Google OCR costs to the result
-    if (googleOcrCosts.pdfs_processed > 0) {
-        result.google_ocr_costs = googleOcrCosts;
+    let result: EnhancedProcessedResult;
+
+    if (pdfExtractedVehicles.length > 0) {
+        // PDF-PRIMARY FLOW: Use PDF-extracted vehicles as the main data source
+        // Only extract images from HTML, don't re-analyze everything
+        console.log(`🚀 PDF-PRIMARY FLOW: Using ${pdfExtractedVehicles.length} PDF-extracted vehicles as primary data`);
+
+        // Extract images from HTML for vehicle matching
+        const availableImages = extractImageUrls(htmlContent, sourceUrl);
+        console.log(`🖼️ Found ${availableImages.length} images in HTML for matching`);
+
+        // Convert PDF-extracted vehicles to VehicleData format
+        const pdfVehicleData: VehicleData[] = pdfExtractedVehicles.map(v => convertExtractedVehicleToVehicleData(v, sourceUrl, availableImages));
+
+        // Create result with PDF vehicles as primary data
+        result = {
+            success: true,
+            content_type: 'cars',
+            source_url: sourceUrl,
+            processed_at: new Date().toISOString(),
+            raw_analysis: { cars: pdfVehicleData },
+            data: pdfVehicleData,
+            cars: pdfVehicleData,
+            token_usage: createTokenUsage(0, 0, 'claude-sonnet-4-5-20250514', 'claude'),  // No additional tokens used for conversion
+        };
+        // Track that this result came from PDF-primary flow
+        (result as any).data_source = 'pdf-primary';
+
+        console.log(`✅ PDF-PRIMARY: ${pdfVehicleData.length} vehicles ready (no HTML re-analysis needed)`);
+    } else {
+        // FALLBACK: No PDF data available, use traditional HTML analysis
+        console.log(`📄 FALLBACK FLOW: No PDF vehicles found, using HTML analysis`);
+        result = await processHtmlWithValidation(
+            htmlContent,
+            sourceUrl,
+            category,
+            enableImageAnalysis,
+            shouldFactCheck,
+            '' // No PDF text - we don't merge raw text anymore
+        );
+    }
+
+    // Add Claude PDF extraction costs to the result AND token_usage
+    if (claudePdfCosts.pdfs_processed > 0) {
+        (result as any).claude_pdf_costs = claudePdfCosts;
+
+        // Add PDF tokens to the main token_usage for proper cost tracking
+        if (result.token_usage) {
+            result.token_usage.prompt_tokens += claudePdfCosts.total_input_tokens;
+            result.token_usage.completion_tokens += claudePdfCosts.total_output_tokens;
+            result.token_usage.total_tokens += claudePdfCosts.total_input_tokens + claudePdfCosts.total_output_tokens;
+            // Add or update estimated cost
+            if (result.token_usage.estimated_cost_usd !== undefined) {
+                result.token_usage.estimated_cost_usd += claudePdfCosts.total_cost_usd;
+            } else {
+                result.token_usage.estimated_cost_usd = claudePdfCosts.total_cost_usd;
+            }
+        }
+
         // Add to total estimated cost
         if (result.total_estimated_cost_usd !== undefined) {
-            result.total_estimated_cost_usd += googleOcrCosts.total_cost_usd;
+            result.total_estimated_cost_usd += claudePdfCosts.total_cost_usd;
+        } else {
+            result.total_estimated_cost_usd = claudePdfCosts.total_cost_usd;
+        }
+
+        console.log(`💰 Added PDF extraction costs to token_usage: ${claudePdfCosts.total_input_tokens + claudePdfCosts.total_output_tokens} tokens, $${claudePdfCosts.total_cost_usd.toFixed(4)}`);
+    }
+
+    // Store PDF-extracted vehicles for merging (new optimized flow)
+    if (pdfExtractedVehicles.length > 0) {
+        (result as any).pdf_extracted_vehicles = pdfExtractedVehicles;
+        console.log(`📊 PDF-extracted vehicles attached to result: ${pdfExtractedVehicles.length} vehicles`);
+
+        // Run Perplexity fact-checking on PDF-extracted data
+        if (PERPLEXITY_API_KEY && result.data && result.data.length > 0) {
+            try {
+                // Get the primary PDF URL for fact-checking
+                const primaryPdfUrl = pdfExtractedVehicles[0]?.source_url || pdfExtractedVehicles[0]?.sourceUrl || sourceUrl;
+                console.log(`🔍 Running Perplexity PDF fact-check against: ${primaryPdfUrl}`);
+
+                onProgress?.('pdf_fact_check_start', `Validating extracted data with Perplexity...`, {});
+
+                const pdfFactCheckResult = await factCheckPDFExtraction(result.data as VehicleData[], primaryPdfUrl);
+
+                // Attach fact-check results
+                (result as any).pdf_fact_check = pdfFactCheckResult;
+
+                // Log findings to progress
+                if (pdfFactCheckResult.success) {
+                    const issues: string[] = [];
+                    if (pdfFactCheckResult.duplicate_vehicles.found) {
+                        issues.push(`${pdfFactCheckResult.duplicate_vehicles.details.length} duplicate vehicles`);
+                    }
+                    if (pdfFactCheckResult.duplicate_variants.found) {
+                        issues.push(`${pdfFactCheckResult.duplicate_variants.details.length} duplicate variants`);
+                    }
+                    if (pdfFactCheckResult.missing_data.found) {
+                        issues.push(`${pdfFactCheckResult.missing_data.details.length} missing data issues`);
+                    }
+
+                    const issuesSummary = issues.length > 0 ? issues.join(', ') : 'No issues found';
+                    onProgress?.('pdf_fact_check_complete', `✅ Fact-check: ${pdfFactCheckResult.accuracy_score}% accuracy - ${issuesSummary}`, {
+                        accuracy: pdfFactCheckResult.accuracy_score,
+                        duplicateVehicles: pdfFactCheckResult.duplicate_vehicles.found,
+                        duplicateVariants: pdfFactCheckResult.duplicate_variants.found,
+                        missingData: pdfFactCheckResult.missing_data.found
+                    });
+                } else {
+                    onProgress?.('pdf_fact_check_failed', `⚠️ Fact-check failed: ${pdfFactCheckResult.summary}`, {});
+                }
+            } catch (factCheckError) {
+                console.error('❌ PDF fact-check error:', factCheckError);
+                onProgress?.('pdf_fact_check_error', `⚠️ Fact-check error: ${factCheckError instanceof Error ? factCheckError.message : 'Unknown'}`, {});
+            }
         }
     }
 
@@ -2726,6 +3577,28 @@ export async function processHtmlWithSmartFactCheck(
         (result as any).raw_pdf_text = pdfExtractedText.length > 50000
             ? pdfExtractedText.substring(0, 50000) + '\n\n... [truncated]'
             : pdfExtractedText;
+    }
+
+    // Store custom extractor data for debugging and viewing in UI
+    if (customExtractorData) {
+        (result as any).custom_extractor_data = customExtractorData;
+        console.log(`📊 Custom extractor data attached to result:`, {
+            variants: customExtractorData.variants?.length || 0,
+            hasEquipment: customExtractorData.variants?.some((v: any) => v.equipment?.length > 0)
+        });
+    }
+
+    // Store two-tier extraction results summary
+    if (twoTierResults.length > 0) {
+        (result as any).two_tier_results = twoTierResults.map(r => ({
+            tier: r.tier,
+            reason: r.reason,
+            pdfUrl: r.pdfUrl,
+            pageCount: r.pageCount,
+            estimatedCost: r.estimatedCost,
+            variantsExtracted: r.fullData?.variants?.length || 0,
+            hasEquipment: r.fullData?.variants?.some((v: any) => v.equipment?.length > 0) || false
+        }));
     }
 
     return result;
