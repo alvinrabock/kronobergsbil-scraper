@@ -147,6 +147,60 @@ export async function formatScrapedContent(result: ScrapeResult): Promise<string
   return combinedHtml;
 }
 
+/**
+ * Extract hero images from linked pages in the formatted HTML
+ * Returns a map of vehicle slug -> hero image URL
+ *
+ * This parses the raw formatted HTML which has clear structure:
+ * <!-- LINKED PAGE X START -->
+ * <!-- URL: https://.../{brand}-{model}/ -->
+ * <picture><source><img src="https://.../800x800-model.jpg...">
+ * <!-- LINKED PAGE X END -->
+ */
+export async function extractLinkedPageHeroImages(formattedHtml: string): Promise<Map<string, string>> {
+  const heroImages = new Map<string, string>();
+
+  // Match each linked page section
+  const linkedPageRegex = /<!-- LINKED PAGE \d+ START -->\s*<!-- LINK TEXT:[^>]*-->\s*<!-- URL: ([^>]+) -->[^]*?<!-- CONTENT START -->([\s\S]*?)<!-- CONTENT END -->\s*<!-- LINKED PAGE \d+ END -->/gi;
+
+  let match;
+  while ((match = linkedPageRegex.exec(formattedHtml)) !== null) {
+    const pageUrl = match[1].trim();
+    const content = match[2];
+
+    // Extract vehicle slug from URL (e.g., "peugeot-208" from ".../peugeot-208/")
+    const urlSlugMatch = pageUrl.match(/\/([^\/]+)\/?$/);
+    const urlSlug = urlSlugMatch ? urlSlugMatch[1].toLowerCase() : null;
+
+    // Extract model name from URL for matching (e.g., "208" from "peugeot-208")
+    const modelNameMatch = urlSlug?.match(/(?:peugeot-|opel-|citroen-|suzuki-|volvo-|toyota-|honda-)?(.+)/);
+    const modelName = modelNameMatch ? modelNameMatch[1] : urlSlug;
+
+    if (!modelName) continue;
+
+    // Find hero image in <picture> element (highest priority)
+    const pictureImgMatch = content.match(/<picture[^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["'][^>]*>[\s\S]*?<\/picture>/i);
+
+    if (pictureImgMatch) {
+      let heroUrl = pictureImgMatch[1]
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>');
+
+      // Strip resize params to get original quality
+      if (heroUrl.includes('?') && (heroUrl.includes('width=') || heroUrl.includes('height='))) {
+        heroUrl = heroUrl.split('?')[0];
+      }
+
+      heroImages.set(modelName, heroUrl);
+      console.log(`🖼️ [Hero] Found hero image for "${modelName}": ${heroUrl.substring(heroUrl.lastIndexOf('/') + 1)}`);
+    }
+  }
+
+  console.log(`🖼️ [Hero] Extracted ${heroImages.size} hero images from linked pages`);
+  return heroImages;
+}
+
 export async function scrapeWebsite(url: string, fetchLinks = true): Promise<ScrapeResult> {
   const browser = await puppeteer.launch({ headless: true });
   const page = await browser.newPage();
@@ -480,7 +534,85 @@ export async function scrapeWebsite(url: string, fetchLinks = true): Promise<Scr
           return entries.length > 0 && entries[0].width > 0 ? entries[0] : null;
         };
 
+        // First, look for images in <picture> elements (usually hero images)
+        document.querySelectorAll('picture').forEach(picture => {
+          // Try to get image from source srcset first (highest quality)
+          const sources = picture.querySelectorAll('source');
+          let bestSrc = '';
+          let bestWidth = 0;
+
+          sources.forEach(source => {
+            const srcset = source.getAttribute('srcset');
+            if (srcset) {
+              // Parse srcset and get largest
+              const entries = srcset.split(',').map(entry => {
+                const parts = entry.trim().split(/\s+/);
+                let url = parts[0];
+                let w = 0;
+                if (parts[1] && parts[1].endsWith('w')) {
+                  w = parseInt(parts[1].replace('w', ''), 10);
+                }
+                // Extract width from URL if present
+                const widthMatch = url.match(/[?&](?:w|width)=(\d+)/i);
+                if (widthMatch) w = Math.max(w, parseInt(widthMatch[1], 10));
+                return { url, width: w };
+              });
+              entries.sort((a, b) => b.width - a.width);
+              if (entries.length > 0 && entries[0].width > bestWidth) {
+                bestSrc = entries[0].url;
+                bestWidth = entries[0].width;
+              }
+            }
+          });
+
+          // Fallback to img inside picture
+          const img = picture.querySelector('img');
+          if (img) {
+            const imgSrc = img.getAttribute('src') || '';
+            if (!bestSrc && imgSrc) {
+              bestSrc = imgSrc;
+              const widthMatch = imgSrc.match(/[?&](?:w|width)=(\d+)/i);
+              if (widthMatch) bestWidth = parseInt(widthMatch[1], 10);
+              bestWidth = bestWidth || img.naturalWidth || parseInt(img.getAttribute('width') || '0', 10);
+            }
+          }
+
+          if (bestSrc && !bestSrc.includes('data:image')) {
+            // Decode HTML entities and resolve URL
+            bestSrc = bestSrc.replace(/&amp;/g, '&');
+            if (bestSrc.startsWith('/')) {
+              try {
+                const urlBase = new URL(baseUrl);
+                bestSrc = `${urlBase.protocol}//${urlBase.host}${bestSrc}`;
+              } catch (e) {}
+            }
+
+            // Picture elements are usually hero images - give big bonus
+            let score = 40; // Base bonus for being in <picture>
+            if (bestWidth >= 800) score += 30;
+            else if (bestWidth >= 600) score += 20;
+
+            // Check for quality indicators in filename
+            const srcLower = bestSrc.toLowerCase();
+            if (srcLower.includes('800x800') || srcLower.includes('1920') || srcLower.includes('hero')) {
+              score += 20;
+            }
+
+            // Try to get original by stripping resize params
+            let originalSrc = bestSrc;
+            if (bestSrc.includes('?') && (bestSrc.includes('width=') || bestSrc.includes('height='))) {
+              originalSrc = bestSrc.split('?')[0];
+            }
+
+            images.push({ src: originalSrc, score, width: bestWidth });
+          }
+        });
+
+        // Then process regular img elements
         document.querySelectorAll('img').forEach(img => {
+          // Skip images already processed in picture elements
+          if (img.closest('picture')) return;
+
           let src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || '';
           let width = 0;
 
@@ -509,8 +641,11 @@ export async function scrapeWebsite(url: string, fetchLinks = true): Promise<Scr
               }
             }
 
-            // Try to extract width from URL or img attributes
-            const widthMatch = src.match(/[?&]w=(\d+)/);
+            // Decode HTML entities in URL (e.g., &amp; -> &)
+            src = src.replace(/&amp;/g, '&');
+
+            // Try to extract width from URL parameters (supports w=, width=)
+            const widthMatch = src.match(/[?&](?:w|width)=(\d+)/i);
             if (widthMatch) {
               width = parseInt(widthMatch[1], 10);
             }
@@ -520,11 +655,25 @@ export async function scrapeWebsite(url: string, fetchLinks = true): Promise<Scr
           // Resolve relative URLs
           src = resolveUrl(src);
 
+          // Decode HTML entities again after resolving
+          src = src.replace(/&amp;/g, '&');
+
           // Skip if we couldn't resolve the URL
           if (!src || !src.startsWith('http')) return;
 
+          // Check if URL has explicit small size parameters - these are resized thumbnails
+          const urlWidthMatch = src.match(/[?&](?:w|width)=(\d+)/i);
+          const urlWidth = urlWidthMatch ? parseInt(urlWidthMatch[1], 10) : 0;
+
           // Score images based on various factors
           let score = 0;
+
+          // STRONGLY penalize images with small width in URL parameters (resized thumbnails)
+          if (urlWidth > 0 && urlWidth < 300) {
+            score -= 50;  // Heavy penalty for explicitly small images
+          } else if (urlWidth > 0 && urlWidth < 500) {
+            score -= 30;
+          }
 
           // STRONGLY prefer larger images (width-based scoring)
           if (width >= 1920) score += 50;
@@ -561,24 +710,61 @@ export async function scrapeWebsite(url: string, fetchLinks = true): Promise<Scr
             score -= 30;
           }
 
-          // Prefer JPG/PNG/WEBP
-          if (srcLower.match(/\.(jpg|jpeg|png|webp)(\?|$)/)) {
-            score += 5;
+          // PREFER lifestyle/environment images over studio shots with white/transparent backgrounds
+          // Lifestyle/outdoor keywords (cars in real environments)
+          if (srcLower.includes('outdoor') || srcLower.includes('lifestyle') ||
+              srcLower.includes('action') || srcLower.includes('scene') ||
+              srcLower.includes('driving') || srcLower.includes('road') ||
+              srcLower.includes('nature') || srcLower.includes('environment') ||
+              srcLower.includes('exterior') || srcLower.includes('hero') ||
+              srcLower.includes('banner') || srcLower.includes('cover')) {
+            score += 25; // Bonus for lifestyle/environment images
+          }
+
+          // Penalize studio/cutout/transparent background images
+          if (srcLower.includes('studio') || srcLower.includes('cutout') ||
+              srcLower.includes('transparent') || srcLower.includes('white-bg') ||
+              srcLower.includes('whitebg') || srcLower.includes('no-bg') ||
+              srcLower.includes('nobg') || srcLower.includes('isolated')) {
+            score -= 20; // Penalty for studio/transparent images
+          }
+
+          // PNG files often have transparent backgrounds - prefer JPG/WEBP for photos
+          if (srcLower.match(/\.png(\?|$)/)) {
+            score -= 10; // Slight penalty for PNG (often transparent/studio)
+          }
+
+          // Prefer JPG/WEBP (typically photos with backgrounds)
+          if (srcLower.match(/\.(jpg|jpeg|webp)(\?|$)/)) {
+            score += 10;
           }
 
           // Prefer images in main content areas (hero sections, main content)
-          if (img.closest('.hero, .banner, .main-image, .featured, [class*="hero"], [class*="banner"]')) {
+          if (img.closest('.hero, .banner, .main-image, .featured, [class*="hero"], [class*="banner"], [class*="model-viewer"], [class*="gallery"], [class*="slider"]')) {
             score += 25;
           } else if (img.closest('main, article, .content, section')) {
             score += 10;
           }
 
-          // Penalize images in footer, nav, sidebar
+          // Penalize images in footer, nav, sidebar, and card/list views (thumbnails)
           if (img.closest('footer, nav, aside, .sidebar, .footer, .nav')) {
             score -= 20;
           }
 
-          images.push({ src, score, width });
+          // Penalize images in card/grid layouts (likely thumbnails)
+          if (img.closest('.card, .grid-item, .list-item, [class*="card"], [class*="thumbnail"]')) {
+            score -= 15;
+          }
+
+          // Try to get original image URL by removing resize parameters
+          let originalSrc = src;
+          if (src.includes('?') && (src.includes('width=') || src.includes('height=') || src.includes('format='))) {
+            // Remove query parameters to get original
+            originalSrc = src.split('?')[0];
+          }
+
+          // Store both the current src and potentially the original
+          images.push({ src: originalSrc !== src && !originalSrc.includes('data:') ? originalSrc : src, score, width });
         });
 
         // Sort by score descending

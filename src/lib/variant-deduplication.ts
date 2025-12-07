@@ -6,6 +6,7 @@
  */
 
 export interface VariantData {
+  id?: string | null;
   name: string;
   price?: number | null;
   old_price?: number | null;
@@ -19,8 +20,11 @@ export interface VariantData {
   old_loan_price?: number | null;
   bransle?: string | null;
   biltyp?: string | null;
+  body_type?: string | null;         // Maps to vehicle_type in CMS
   vaxellada?: string | null;
   thumbnail?: string | null;
+  thumbnail_url?: string | null;     // Alternative thumbnail field
+  bild?: string | null;              // CMS field for variant image
   utrustning?: string[];
   // New schema fields
   fuel_type?: string | null;

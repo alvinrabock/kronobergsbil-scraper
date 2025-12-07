@@ -9,13 +9,17 @@ interface VehicleModel {
   price?: number;
   old_price?: number;
   privatleasing?: number;
+  old_privatleasing?: number;      // Previous private leasing price
   company_leasing?: number;        // New schema
   company_leasing_price?: number;  // Legacy schema
+  old_company_leasing?: number;    // Previous company leasing price
   loan_price?: number;
+  old_loan_price?: number;         // Previous loan price
   thumbnail_url?: string;
   thumbnail?: string;              // New schema
   fuel_type?: string;
   transmission?: string;
+  body_type?: string;              // Vehicle body type (suv, sedan, kombi, etc.)
   specs?: any;
   equipment?: string[];
 }
@@ -28,6 +32,7 @@ interface Vehicle {
   thumbnail_url?: string;
   thumbnail?: string;              // New schema
   vehicle_type?: string;
+  body_type?: string;              // Vehicle body type (suv, sedan, kombi, etc.)
   free_text?: string;
   vehicle_models?: VehicleModel[]; // Legacy schema
   variants?: VehicleModel[];       // New schema
@@ -66,22 +71,32 @@ export function CMSPushPanel({ aiResults }: CMSPushPanelProps) {
 
     aiResults.forEach(result => {
       if (result.success || result.cars || result.transport_cars) {
-        // Add cars
+        // Add cars (personbil in CMS)
         if (result.cars && Array.isArray(result.cars)) {
           result.cars.forEach((car: Vehicle) => {
             vehicles.push({
               ...car,
-              vehicle_type: 'cars'
+              vehicle_type: 'personbil'  // CMS select value
             });
           });
         }
 
-        // Add transport cars
+        // Add transport cars (transportbil in CMS)
         if (result.transport_cars && Array.isArray(result.transport_cars)) {
           result.transport_cars.forEach((car: Vehicle) => {
             vehicles.push({
               ...car,
-              vehicle_type: 'transport_cars'
+              vehicle_type: 'transportbil'  // CMS select value
+            });
+          });
+        }
+
+        // Add moped cars if present (mopedbil in CMS)
+        if (result.moped_cars && Array.isArray(result.moped_cars)) {
+          result.moped_cars.forEach((car: Vehicle) => {
+            vehicles.push({
+              ...car,
+              vehicle_type: 'mopedbil'  // CMS select value
             });
           });
         }
@@ -149,24 +164,35 @@ export function CMSPushPanel({ aiResults }: CMSPushPanelProps) {
       // Handle both new schema (variants) and legacy schema (vehicle_models)
       const transformedVehicles = selectedList.map(vehicle => {
         const models = vehicle.variants || vehicle.vehicle_models || [];
+        // Get body_type from vehicle level (variants inherit from parent vehicle)
+        const vehicleBodyType = vehicle.body_type || vehicle.vehicle_type;
+
         return {
           title: vehicle.title,
           brand: vehicle.brand,
           description: vehicle.description || vehicle.free_text || '',
           thumbnail: vehicle.thumbnail_url || vehicle.thumbnail,
-          // Use new 'variants' field name for CMS API, but also include legacy for backward compat
+          body_type: vehicleBodyType, // Pass vehicle-level body_type
+          // Use new 'variants' field name for CMS API with all fields
           variants: models.map(model => ({
+            id: model.id,
             name: model.name,
             price: model.price,
             old_price: model.old_price,
             privatleasing: model.privatleasing,
+            old_privatleasing: model.old_privatleasing,
             company_leasing: model.company_leasing || model.company_leasing_price,
+            old_company_leasing: model.old_company_leasing || (model as any).old_company_leasing_price,
             loan_price: model.loan_price,
+            old_loan_price: model.old_loan_price,
             thumbnail: model.thumbnail_url || model.thumbnail,
-            fuel_type: model.fuel_type,
-            transmission: model.transmission,
+            // Support both new and legacy field names for backward compatibility
+            fuel_type: model.fuel_type || (model as any).bransle,
+            transmission: model.transmission || (model as any).vaxellada,
+            // Use variant's body_type if available, otherwise inherit from vehicle
+            body_type: model.body_type || (model as any).biltyp || vehicleBodyType,
             specs: model.specs,
-            equipment: model.equipment
+            equipment: model.equipment || (model as any).utrustning
           })),
           // Legacy field for backward compatibility
           vehicle_model: models.map(model => ({
@@ -174,8 +200,11 @@ export function CMSPushPanel({ aiResults }: CMSPushPanelProps) {
             price: model.price,
             old_price: model.old_price,
             privatleasing: model.privatleasing,
+            old_privatleasing: model.old_privatleasing,
             company_leasing_price: model.company_leasing || model.company_leasing_price,
+            old_company_leasing: model.old_company_leasing,
             loan_price: model.loan_price,
+            old_loan_price: model.old_loan_price,
             thumbnail: model.thumbnail_url || model.thumbnail
           })),
           free_text: vehicle.free_text

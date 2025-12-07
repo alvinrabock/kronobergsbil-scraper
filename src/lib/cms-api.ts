@@ -46,22 +46,59 @@ export interface VariantSpecs {
   [key: string]: any;
 }
 
-// Variant structure matching CMS schema
+// Specs object for CMS repeater - each entry has these text fields
+export interface CMSSpecsEntry {
+  engine_cc?: string;
+  cylinders?: string;
+  power_kw?: string;
+  power_hp?: string;
+  torque_nm?: string;
+  top_speed_kmh?: string;
+  acceleration_0_100?: string;
+  fuel_consumption_l_100km?: string;
+  consumption_kwh_100km?: string;
+  co2_g_km?: string;
+  emission_class?: string;
+  range_km_wltp?: string;
+  battery_kwh?: string;
+  battery_type?: string;
+  battery_voltage?: string;
+  onboard_charger_kw?: string;
+  charging_time_home?: string;
+  charging_time_wallbox?: string;
+  charging_time_fast?: string;
+  drive_modes?: string;
+  curb_weight_kg?: string;
+  gross_weight_kg?: string;
+  max_payload_kg?: string;
+  max_towing_kg?: string;
+  turning_circle_m?: string;
+  tire_dimension?: string;
+}
+
+// Equipment item for CMS equipment repeater (slug: equipment)
+export interface CMSEquipmentItem {
+  item: string;                       // Equipment item name (slug: item)
+}
+
+// Variant structure matching CMS schema (exact slugs)
 export interface VehicleVariant {
-  name?: string;                      // Variant name
-  price?: number;                     // Price
-  old_price?: string;                 // Previous price (for discounts)
-  privatleasing?: string;             // Private leasing price
-  old_privatleasing?: string;         // Previous private leasing price
-  company_leasing_price?: string;     // Company leasing price
-  old_company_leasing_price?: string; // Previous company leasing price
-  loan_price?: string;                // Monthly loan price
-  old_loan_price?: string;            // Previous loan price
-  bransle?: string;                   // Fuel type (El, Bensin, Diesel, Hybrid)
-  biltyp?: string;                    // Vehicle type
-  vaxellada?: string;                 // Transmission (Automat, Manuell)
-  specs?: VariantSpecs;               // Technical specifications
-  equipment?: EquipmentItem[];        // Equipment list
+  id?: string;                        // slug: id
+  name?: string;                      // slug: name
+  vehicle_type?: string;              // slug: vehicle_type (car, suv, kombi, hatchback, sedan, coupe, cabriolet, van, pickup)
+  thumbnail?: string;                 // slug: thumbnail (URL)
+  price?: number;                     // slug: price (Number)
+  old_price?: number;                 // slug: old_price (Number)
+  privatleasing?: number;             // slug: privatleasing (Number)
+  old_privatleasing?: number;         // slug: old_privatleasing (Number)
+  company_leasing?: number;           // slug: company_leasing (Number)
+  old_company_leasing?: number;       // slug: old_company_leasing (Number)
+  loan_price?: number;                // slug: loan_price (Number)
+  old_loan_price?: number;            // slug: old_loan_price (Number)
+  fuel_type?: string;                 // slug: fuel_type (Bensin, Diesel, Hybrid, El)
+  transmission?: string;              // slug: transmission (Manuell, Automat, e-CVT)
+  specs?: CMSSpecsEntry[];            // slug: specs (Repeater with spec fields)
+  equipment?: CMSEquipmentItem[];     // slug: equipment (Repeater with item field)
 }
 
 // Color option for CMS
@@ -133,6 +170,7 @@ export interface CMSDealerInfo {
 // Content structure for bilmodell
 export interface BilmodellContent {
   namn?: string;                      // Model name
+  fordonstyp?: string;                // Vehicle type: personbil, transportbil, mopedbil
   description?: string;               // Description
   fritext?: string;                   // Free text
   varianter?: VehicleVariant[];       // Model variants
@@ -265,7 +303,7 @@ export async function getExistingBilmodeller(): Promise<CMSPost[]> {
   try {
     console.log('🔍 Fetching existing bilmodeller from CMS...');
 
-    const response = await cmsRequest<{ posts: CMSPost[] }>('/posts?post_type_slug=bilmodeller&limit=1000');
+    const response = await cmsRequest<{ posts: CMSPost[] }>('/posts?post_type=bilmodeller&limit=1000');
 
     console.log(`✅ Found ${response.posts?.length || 0} existing bilmodeller`);
     return response.posts || [];
@@ -280,7 +318,7 @@ export async function getExistingBilmarken(): Promise<CMSPost[]> {
   try {
     console.log('🔍 Fetching existing bilmarken from CMS...');
 
-    const response = await cmsRequest<{ posts: CMSPost[] }>('/posts?post_type_slug=bilmarken&limit=1000');
+    const response = await cmsRequest<{ posts: CMSPost[] }>('/posts?post_type=bilmarken&limit=1000');
 
     console.log(`✅ Found ${response.posts?.length || 0} existing bilmarken`);
     return response.posts || [];
@@ -290,7 +328,7 @@ export async function getExistingBilmarken(): Promise<CMSPost[]> {
   }
 }
 
-// Find or create a bilmarke (brand)
+// Find existing bilmarke (brand) by name or slug - NEVER creates new brands
 export async function findOrCreateBilmarke(brandName: string): Promise<string | null> {
   if (!brandName || brandName.trim() === '') {
     return null;
@@ -300,23 +338,29 @@ export async function findOrCreateBilmarke(brandName: string): Promise<string | 
   const normalizedSlug = generateSlug(normalizedName);
 
   try {
-    // First, try to find existing brand
+    // Fetch existing brands from CMS
     const existingBrands = await getExistingBilmarken();
 
-    // Try exact title match first
+    // 1. Try exact slug match first (most reliable)
     let existingBrand = existingBrands.find(
-      b => b.title.toLowerCase() === normalizedName.toLowerCase()
+      b => b.slug === normalizedSlug
     );
 
-    // If no title match, try slug match
+    // 2. Try exact title match (case-insensitive)
     if (!existingBrand) {
       existingBrand = existingBrands.find(
-        b => b.slug === normalizedSlug ||
-             generateSlug(b.title) === normalizedSlug
+        b => b.title.toLowerCase() === normalizedName.toLowerCase()
       );
     }
 
-    // Also try partial slug match (e.g., "Suzuki" matches slug "suzuki-bilar")
+    // 3. Try matching generated slug from title
+    if (!existingBrand) {
+      existingBrand = existingBrands.find(
+        b => generateSlug(b.title) === normalizedSlug
+      );
+    }
+
+    // 4. Try partial slug match (e.g., "Suzuki" matches slug "suzuki-bilar")
     if (!existingBrand) {
       existingBrand = existingBrands.find(
         b => b.slug?.startsWith(normalizedSlug) ||
@@ -324,98 +368,190 @@ export async function findOrCreateBilmarke(brandName: string): Promise<string | 
       );
     }
 
+    // 5. Try if brand slug contains normalized name
+    if (!existingBrand) {
+      existingBrand = existingBrands.find(
+        b => normalizedSlug.includes(b.slug) ||
+             b.title.toLowerCase().includes(normalizedName.toLowerCase())
+      );
+    }
+
     if (existingBrand) {
-      console.log(`✅ Found existing brand: ${normalizedName} -> ID: ${existingBrand.id} (slug: ${existingBrand.slug})`);
+      console.log(`✅ Found existing brand: "${normalizedName}" -> ID: ${existingBrand.id} (slug: ${existingBrand.slug})`);
       return existingBrand.id;
     }
 
-    // Create new brand if not found
-    console.log(`🆕 Creating new brand: ${normalizedName}`);
-
-    const response = await cmsRequest<CMSResponse>('/posts', {
-      method: 'POST',
-      body: JSON.stringify({
-        post_type_slug: 'bilmarken',
-        title: normalizedName,
-        slug: generateSlug(normalizedName),
-        status: 'published',
-        content: {
-          beskrivning: ''
-        }
-      })
-    });
-
-    console.log(`✅ Created new brand: ${normalizedName} -> ID: ${response.post.id}`);
-    return response.post.id;
+    // NEVER create new brands - only use existing ones
+    console.warn(`⚠️ Brand not found in CMS: "${normalizedName}" (slug: ${normalizedSlug}). Available brands: ${existingBrands.map(b => b.slug).join(', ')}`);
+    console.warn(`⚠️ Please create the brand "${normalizedName}" manually in the CMS before importing.`);
+    return null;
 
   } catch (error) {
-    console.error(`❌ Error handling brand ${normalizedName}:`, error);
+    console.error(`❌ Error finding brand ${normalizedName}:`, error);
     return null;
   }
 }
 
-// Helper: Convert equipment strings to CMS object format
-function transformEquipmentToCMS(equipment: string[] | any[]): EquipmentItem[] {
+// Helper: Convert equipment to CMS equipment repeater format (slug: equipment, item slug: item)
+function transformEquipmentToCMS(equipment: string[] | any[]): CMSEquipmentItem[] {
   if (!equipment || !Array.isArray(equipment) || equipment.length === 0) {
     return [];
   }
 
-  return equipment.map((item, index) => {
-    // If already an object with name, use it
+  return equipment.map((item) => {
+    // If already an object, extract the name/item string
     if (typeof item === 'object' && item !== null) {
       return {
-        item: item.item || item.id || `equip_${index}`,
-        name: item.name || item.item || String(item),
-        category: item.category || undefined,
-        description: item.description || undefined
+        item: item.name || item.item || String(item)
       };
     }
-    // Convert string to object format
+    // String items directly
     return {
-      item: `equip_${index}`,
-      name: String(item),
-      category: undefined,
-      description: undefined
+      item: String(item)
     };
   });
 }
 
-// Helper: Transform specs to CMS format
-function transformSpecsToCMS(specs: any): VariantSpecs | undefined {
+// Helper: Map vehicle category to CMS fordonstyp select (personbil, transportbil, mopedbil)
+function mapVehicleCategoryToCMS(vehicleType: string | undefined): string {
+  if (!vehicleType) return 'personbil';
+
+  const normalized = vehicleType.toLowerCase().trim();
+
+  // Map to CMS fordonstyp select values: personbil, transportbil, mopedbil
+  const mappings: Record<string, string> = {
+    'cars': 'personbil',
+    'car': 'personbil',
+    'personbil': 'personbil',
+    'transport_cars': 'transportbil',
+    'transport': 'transportbil',
+    'transportbil': 'transportbil',
+    'moped_cars': 'mopedbil',
+    'moped': 'mopedbil',
+    'mopedbil': 'mopedbil',
+  };
+
+  return mappings[normalized] || 'personbil';
+}
+
+// Helper: Map body_type to CMS variant vehicle_type select (suv, sedan, kombi, etc.)
+function mapBodyTypeToVehicleType(bodyType: string | undefined): string | undefined {
+  if (!bodyType) return undefined;
+
+  const normalized = bodyType.toLowerCase().trim();
+
+  // Direct mappings to CMS variant vehicle_type select values
+  const mappings: Record<string, string> = {
+    'sedan': 'sedan',
+    'suv': 'suv',
+    'kombi': 'kombi',
+    'halvkombi': 'hatchback',
+    'hatchback': 'hatchback',
+    'coupe': 'coupe',
+    'coupé': 'coupe',
+    'cab': 'cabriolet',
+    'cabriolet': 'cabriolet',
+    'convertible': 'cabriolet',
+    'van': 'van',
+    'minivan': 'van',
+    'mpv': 'van',
+    'pickup': 'pickup',
+    'truck': 'pickup',
+    'crossover': 'suv',
+    'stationwagon': 'kombi',
+    'station wagon': 'kombi',
+    'estate': 'kombi',
+  };
+
+  return mappings[normalized] || normalized;
+}
+
+// Helper: Map fuel type to CMS fuel_type select options (exact CMS values)
+function mapFuelTypeToCMS(fuelType: string | undefined): string | undefined {
+  if (!fuelType) return undefined;
+
+  const normalized = fuelType.toLowerCase().trim();
+
+  // Direct mappings to CMS select values (Bensin, Diesel, Hybrid, El)
+  const mappings: Record<string, string> = {
+    'bensin': 'Bensin',
+    'petrol': 'Bensin',
+    'gasoline': 'Bensin',
+    'diesel': 'Diesel',
+    'hybrid': 'Hybrid',
+    'plug-in hybrid': 'Hybrid',
+    'laddhybrid': 'Hybrid',       // Swedish for plug-in hybrid
+    'phev': 'Hybrid',
+    'mildhybrid': 'Hybrid',
+    'mild hybrid': 'Hybrid',
+    'el': 'El',
+    'electric': 'El',
+    'elektrisk': 'El',            // Swedish for electric
+    'ev': 'El',
+    'bev': 'El',
+  };
+
+  return mappings[normalized] || fuelType; // Return original if no mapping found
+}
+
+// Helper: Map transmission to CMS transmission select options (exact CMS values)
+function mapTransmissionToCMS(transmission: string | undefined): string | undefined {
+  if (!transmission) return undefined;
+
+  const normalized = transmission.toLowerCase().trim();
+
+  // Direct mappings to CMS select values (Manuell, Automat, e-CVT)
+  const mappings: Record<string, string> = {
+    'manuell': 'Manuell',
+    'manual': 'Manuell',
+    'automat': 'Automat',
+    'automatic': 'Automat',
+    'auto': 'Automat',
+    'dct': 'Automat',
+    'dsg': 'Automat',
+    'at': 'Automat',
+    'e-cvt': 'e-CVT',
+    'ecvt': 'e-CVT',
+    'cvt': 'e-CVT',
+    'steglös': 'e-CVT',
+    'steglos': 'e-CVT',
+  };
+
+  return mappings[normalized] || transmission; // Return original if no mapping found
+}
+
+// Helper: Transform specs to CMS specs repeater format
+// CMS expects an array with one entry containing all spec fields as strings
+function transformSpecsToCMS(specs: any): CMSSpecsEntry[] | undefined {
   if (!specs || typeof specs !== 'object') {
     return undefined;
   }
 
-  const cmsSpecs: VariantSpecs = {};
-
-  // Map all numeric/string fields
-  const numericFields = [
-    'power_kw', 'power_hp', 'torque_nm', 'top_speed_kmh', 'acceleration_0_100',
-    'fuel_consumption_l_100km', 'consumption_kwh_100km', 'co2_g_km',
-    'range_km_wltp', 'battery_kwh', 'curb_weight_kg', 'gross_weight_kg',
-    'max_payload_kg', 'max_towing_kg', 'turning_circle_m', 'onboard_charger_kw',
-    'engine_cc', 'cylinders', 'battery_voltage'
+  // Valid spec fields in CMS
+  const validFields = [
+    'engine_cc', 'cylinders', 'power_kw', 'power_hp', 'torque_nm',
+    'top_speed_kmh', 'acceleration_0_100', 'fuel_consumption_l_100km',
+    'consumption_kwh_100km', 'co2_g_km', 'emission_class', 'range_km_wltp',
+    'battery_kwh', 'battery_type', 'battery_voltage', 'onboard_charger_kw',
+    'charging_time_home', 'charging_time_wallbox', 'charging_time_fast',
+    'drive_modes', 'curb_weight_kg', 'gross_weight_kg', 'max_payload_kg',
+    'max_towing_kg', 'turning_circle_m', 'tire_dimension'
   ];
 
-  const stringFields = [
-    'battery_type', 'emission_class', 'charging_time_home',
-    'charging_time_wallbox', 'charging_time_fast', 'tire_dimension'
-  ];
+  const specsEntry: CMSSpecsEntry = {};
+  let hasSpecs = false;
 
-  for (const field of numericFields) {
-    if (specs[field] !== null && specs[field] !== undefined) {
-      cmsSpecs[field] = specs[field];
+  // Convert all non-null values to string fields
+  for (const field of validFields) {
+    const value = specs[field];
+    if (value !== null && value !== undefined && value !== '') {
+      specsEntry[field as keyof CMSSpecsEntry] = String(value);
+      hasSpecs = true;
     }
   }
 
-  for (const field of stringFields) {
-    if (specs[field]) {
-      cmsSpecs[field] = specs[field];
-    }
-  }
-
-  // Only return if we have at least one field
-  return Object.keys(cmsSpecs).length > 0 ? cmsSpecs : undefined;
+  // Return array with single entry if we have specs, otherwise undefined
+  return hasSpecs ? [specsEntry] : undefined;
 }
 
 // Transform scraped vehicle data to CMS format
@@ -462,13 +598,13 @@ export async function transformVehicleDataToCMS(vehicleData: any): Promise<Creat
         variant.privatleasing = privatleasing;
       }
 
-      // Handle company leasing (new schema uses company_leasing, old uses company_leasing_price)
+      // Handle company leasing (CMS slug: company_leasing)
       const companyLeasing = model.company_leasing ||
                             model.company_leasing_price ||
                             model.foretagsleasingpris ||
                             model.financing_options?.company_leasing?.[0]?.monthly_price;
       if (companyLeasing && companyLeasing > 0) {
-        variant.company_leasing_price = companyLeasing;
+        variant.company_leasing = companyLeasing;
       }
 
       // Handle loan price
@@ -486,28 +622,28 @@ export async function transformVehicleDataToCMS(vehicleData: any): Promise<Creat
       }
       const oldCompanyLeasing = model.old_company_leasing || model.old_company_leasing_price;
       if (oldCompanyLeasing && oldCompanyLeasing > 0) {
-        variant.old_company_leasing_price = oldCompanyLeasing;
+        variant.old_company_leasing = oldCompanyLeasing;
       }
       if (model.old_loan_price && model.old_loan_price > 0) {
         variant.old_loan_price = model.old_loan_price;
       }
 
-      // Add fuel type if available (new schema uses fuel_type, old uses bransle)
+      // Add fuel type (CMS slug: fuel_type)
       const fuelType = model.fuel_type || model.bransle;
       if (fuelType) {
-        variant.bransle = fuelType;
+        variant.fuel_type = fuelType;
       }
 
-      // Add car type if available
-      const carType = model.car_type || model.biltyp;
-      if (carType) {
-        variant.biltyp = carType;
+      // Add body/vehicle type (CMS slug: vehicle_type)
+      const bodyType = model.body_type || model.car_type || model.biltyp;
+      if (bodyType) {
+        variant.body_type = bodyType;
       }
 
-      // Add transmission if available (new schema uses transmission, old uses vaxellada)
+      // Add transmission (CMS slug: transmission)
       const transmission = model.transmission || model.vaxellada;
       if (transmission) {
-        variant.vaxellada = transmission;
+        variant.transmission = transmission;
       }
 
       // Add specs if available (NEW SCHEMA)
@@ -529,33 +665,52 @@ export async function transformVehicleDataToCMS(vehicleData: any): Promise<Creat
   console.log(`🔄 Deduplicating ${rawVarianter.length} variants for "${vehicleData.title}"...`);
   const deduplicatedVariants = deduplicateVariants(rawVarianter, 0.80);
 
-  // Convert to CMS format (strings for price fields, objects for equipment)
-  const varianter: VehicleVariant[] = deduplicatedVariants.map(v => {
+  // Convert to CMS format (Numbers for price fields, repeaters for specs/equipment)
+  const varianter: VehicleVariant[] = deduplicatedVariants.map((v, index) => {
+    // Get company leasing value from various possible field names
+    const companyLeasing = v.company_leasing || v.company_leasing_price;
+    const oldCompanyLeasing = v.old_company_leasing || v.old_company_leasing_price;
+
+    // Map fuel type to CMS select values
+    const fuelTypeRaw = v.fuel_type || v.bransle;
+    const fuelType = fuelTypeRaw ? mapFuelTypeToCMS(fuelTypeRaw) : undefined;
+
+    // Map transmission to CMS select values
+    const transmissionRaw = v.transmission || v.vaxellada;
+    const transmission = transmissionRaw ? mapTransmissionToCMS(transmissionRaw) : undefined;
+
     const cmsVariant: VehicleVariant = {
+      // Generate unique ID for variant
+      id: v.id || `variant_${index + 1}`,
       name: v.name,
-      price: v.price || undefined,
-      old_price: v.old_price ? String(v.old_price) : undefined,
-      privatleasing: v.privatleasing ? String(v.privatleasing) : undefined,
-      old_privatleasing: v.old_privatleasing ? String(v.old_privatleasing) : undefined,
-      company_leasing_price: v.company_leasing_price ? String(v.company_leasing_price) : undefined,
-      old_company_leasing_price: v.old_company_leasing_price ? String(v.old_company_leasing_price) : undefined,
-      loan_price: v.loan_price ? String(v.loan_price) : undefined,
-      old_loan_price: v.old_loan_price ? String(v.old_loan_price) : undefined,
-      bransle: v.bransle || undefined,
-      biltyp: v.biltyp || undefined,
-      vaxellada: v.vaxellada || undefined,
+      // Map body_type to vehicle_type select field (CMS slug: vehicle_type)
+      vehicle_type: mapBodyTypeToVehicleType(v.body_type || v.biltyp),
+      // Variant thumbnail URL (CMS slug: thumbnail)
+      thumbnail: v.thumbnail || v.thumbnail_url || v.bild || undefined,
+      // All prices as Numbers (CMS expects Number type)
+      price: v.price && v.price > 0 ? v.price : undefined,
+      old_price: v.old_price && v.old_price > 0 ? v.old_price : undefined,
+      privatleasing: v.privatleasing && v.privatleasing > 0 ? v.privatleasing : undefined,
+      old_privatleasing: v.old_privatleasing && v.old_privatleasing > 0 ? v.old_privatleasing : undefined,
+      company_leasing: companyLeasing && companyLeasing > 0 ? companyLeasing : undefined,
+      old_company_leasing: oldCompanyLeasing && oldCompanyLeasing > 0 ? oldCompanyLeasing : undefined,
+      loan_price: v.loan_price && v.loan_price > 0 ? v.loan_price : undefined,
+      old_loan_price: v.old_loan_price && v.old_loan_price > 0 ? v.old_loan_price : undefined,
+      fuel_type: fuelType,
+      transmission: transmission,
     };
 
-    // Add specs if available
+    // Add specs if available (convert to repeater format)
     const specs = transformSpecsToCMS(v.specs);
-    if (specs) {
+    if (specs && specs.length > 0) {
       cmsVariant.specs = specs;
+      console.log(`  📊 Added specs to "${v.name}"`);
     }
 
-    // Add equipment (convert strings to objects for CMS)
-    const equipment = v.equipment || v.utrustning;
-    if (equipment && equipment.length > 0) {
-      cmsVariant.equipment = transformEquipmentToCMS(equipment);
+    // Add equipment (CMS slug: equipment)
+    const equipmentData = v.equipment || v.utrustning;
+    if (equipmentData && equipmentData.length > 0) {
+      cmsVariant.equipment = transformEquipmentToCMS(equipmentData);
       console.log(`  📦 Added ${cmsVariant.equipment.length} equipment items to "${v.name}"`);
     }
 
@@ -673,6 +828,9 @@ export async function transformVehicleDataToCMS(vehicleData: any): Promise<Creat
     };
   }
 
+  // Map vehicle category (cars, transport_cars, moped_cars) to CMS fordonstyp
+  const fordonstyp = mapVehicleCategoryToCMS(vehicleData.vehicle_type);
+
   // Build the request object
   const result: CreateBilmodellRequest = {
     post_type_slug: 'bilmodeller',
@@ -681,6 +839,7 @@ export async function transformVehicleDataToCMS(vehicleData: any): Promise<Creat
     status: 'published',
     content: {
       namn: vehicleData.title.trim(),
+      fordonstyp: fordonstyp,  // personbil, transportbil, or mopedbil
       description: vehicleData.description || undefined,
       fritext: vehicleData.free_text || undefined,
       varianter: varianter.length > 0 ? varianter : undefined,
@@ -705,6 +864,7 @@ export async function transformVehicleDataToCMS(vehicleData: any): Promise<Creat
   // Log summary of what's being sent
   console.log('🔄 Transformed result summary:');
   console.log(`  - Title: ${result.title}`);
+  console.log(`  - Fordonstyp: ${fordonstyp}`);
   console.log(`  - Varianter: ${varianter.length}`);
   console.log(`  - Colors: ${colors.length}`);
   console.log(`  - Interiors: ${interiors.length}`);

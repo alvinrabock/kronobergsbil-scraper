@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { scrapeWebsite, formatScrapedContent } from '@/lib/scraper'
+import { scrapeWebsite, formatScrapedContent, extractLinkedPageHeroImages } from '@/lib/scraper'
 import { processHtmlWithSmartFactCheck } from '@/lib/ai-processor'
 import { ScrapeService } from '@/lib/database/scrapeService'
 import { getSupabaseServer } from '@/lib/supabase/server'
@@ -316,6 +316,10 @@ export async function POST(request: NextRequest) {
             const formattedContent = await formatScrapedContent(scrapeResult)
             console.log(`📄 Formatted content includes ${scrapeResult.linkedContent?.length || 0} linked pages`)
 
+            // Extract hero images from linked pages BEFORE the markers are transformed
+            // This gives us high-quality images from individual vehicle pages
+            const linkedPageHeroImages = await extractLinkedPageHeroImages(formattedContent)
+
             // ============================================================
             // SMART SCRAPE: Extract content sections with proper URL mapping
             // ============================================================
@@ -369,6 +373,7 @@ export async function POST(request: NextRequest) {
 
             // Use prepared HTML with clear URL markers
             // Pass progress callback to receive PDF extraction updates
+            // Pass linkedPageHeroImages for high-quality hero image matching
             aiResult = await processHtmlWithSmartFactCheck(
               preparedHtml,
               scrapeResult.url,
@@ -393,7 +398,8 @@ export async function POST(request: NextRequest) {
                   progress,
                   data
                 });
-              }
+              },
+              linkedPageHeroImages  // Hero images from linked pages for thumbnail matching
             )
             const aiProcessingTime = Date.now() - aiStartTime
 

@@ -5,6 +5,36 @@ import { ScrapeResult, LinkedContent } from '@/lib/scraper'
 import { ProcessedResult, CampaignData, VehicleData } from '@/lib/ai-processor-types'
 import { deduplicateVariants, VariantData } from '@/lib/variant-deduplication'
 
+/**
+ * Clean thumbnail URL by:
+ * 1. Decoding HTML entities (&amp; -> &)
+ * 2. Stripping small resize parameters to get original image
+ */
+function cleanThumbnailUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+
+  // Decode HTML entities
+  let cleanUrl = url
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+
+  // Strip small resize parameters to get original image
+  if (cleanUrl.includes('?') && (cleanUrl.includes('width=') || cleanUrl.includes('height='))) {
+    const widthMatch = cleanUrl.match(/[?&]width=(\d+)/i);
+    const urlWidth = widthMatch ? parseInt(widthMatch[1], 10) : 0;
+
+    // If it's a small thumbnail (width < 500), strip params to get original
+    if (urlWidth > 0 && urlWidth < 500) {
+      cleanUrl = cleanUrl.split('?')[0];
+    }
+  }
+
+  return cleanUrl;
+}
+
 type Tables = Database['public']['Tables']
 type ScrapeSession = Tables['scrape_sessions']['Row']
 type ScrapedContent = Tables['scraped_content']['Row']
@@ -342,7 +372,7 @@ export class ScrapeService {
           title: data.title,
           cleaned_html: result.cleanedHtml,
           raw_html: data.rawHtml,
-          thumbnail_url: data.image,
+          thumbnail_url: cleanThumbnailUrl(data.image),
           price: data.price,
           year: data.year,
           mileage: data.mileage,
@@ -614,7 +644,7 @@ export class ScrapeService {
           title: campaign.title,
           description: campaign.description,
           content: campaign.content,
-          thumbnail_url: campaign.thumbnail,
+          thumbnail_url: cleanThumbnailUrl(campaign.thumbnail),
           brand: campaign.brand,
           campaign_start: campaign.campaign_start,
           campaign_end: campaign.campaign_end,
@@ -641,7 +671,7 @@ export class ScrapeService {
           old_company_leasing_price: model.old_company_leasing_price,
           loan_price: model.loan_price,
           old_loan_price: model.old_loan_price,
-          thumbnail_url: model.thumbnail
+          thumbnail_url: cleanThumbnailUrl(model.thumbnail)
         }))
 
         const { error: modelsError } = await client
@@ -737,7 +767,7 @@ export class ScrapeService {
 
         // Merge other fields if existing is empty
         if (!existing.description && vehicle.description) existing.description = vehicle.description
-        if (!existing.thumbnail && vehicle.thumbnail) existing.thumbnail = vehicle.thumbnail
+        if (!existing.thumbnail && vehicle.thumbnail) existing.thumbnail = cleanThumbnailUrl(vehicle.thumbnail)
         if (!existing.body_type && vehicle.body_type) existing.body_type = vehicle.body_type
 
       } else {
@@ -837,7 +867,7 @@ export class ScrapeService {
             session_id: sessionId,
             title: baseTitle, // Update to base title if shorter
             description: vehicle.description || undefined,
-            thumbnail_url: vehicle.thumbnail || undefined,
+            thumbnail_url: cleanThumbnailUrl(vehicle.thumbnail) || undefined,
             vehicle_type: vehicleType,
             body_type: vehicle.body_type || undefined,
             free_text: vehicle.free_text || undefined,
@@ -866,7 +896,7 @@ export class ScrapeService {
             title: titleToInsert,
             brand: vehicle.brand,
             description: vehicle.description,
-            thumbnail_url: vehicle.thumbnail,
+            thumbnail_url: cleanThumbnailUrl(vehicle.thumbnail),
             vehicle_type: vehicleType,
             body_type: vehicle.body_type,
             free_text: vehicle.free_text,
@@ -932,7 +962,7 @@ export class ScrapeService {
             old_company_leasing_price: model.old_company_leasing ?? model.old_company_leasing_price ?? null,
             loan_price: model.loan_price ?? null,
             old_loan_price: model.old_loan_price ?? null,
-            thumbnail_url: model.thumbnail ?? null,
+            thumbnail_url: cleanThumbnailUrl(model.thumbnail) ?? null,
             // Legacy fields (still supported)
             bransle: model.bransle ?? model.fuel_type ?? null,
             biltyp: model.biltyp ?? model.car_type ?? null,

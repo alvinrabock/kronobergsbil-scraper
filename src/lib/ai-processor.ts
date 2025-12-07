@@ -1950,6 +1950,72 @@ async function enhanceWithImageAnalysis(item: Vehicle | Campaign, htmlContent: s
 
 function extractImageUrls(htmlContent: string, sourceUrl: string): string[] {
     const imageUrls: string[] = [];
+    const linkedPageUrls = new Set<string>(); // Track images from linked pages (hero images)
+
+    // Helper to decode HTML entities in URLs
+    const decodeHtmlEntities = (url: string): string => {
+        if (!url) return url;
+        return url
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'");
+    };
+
+    // Extract images from linked page sections FIRST (these are hero images from individual vehicle pages)
+    const linkedPageRegex = /<!-- LINKED PAGE \d+ START -->([\s\S]*?)<!-- LINKED PAGE \d+ END -->/gi;
+    let linkedPageMatch;
+    while ((linkedPageMatch = linkedPageRegex.exec(htmlContent)) !== null) {
+        const linkedPageContent = linkedPageMatch[1];
+        console.log('🔗 Parsing images from linked page section...');
+
+        // Extract <picture> elements first (highest quality)
+        const pictureRegex = /<picture[^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["'][^>]*>[\s\S]*?<\/picture>/gi;
+        let pictureMatch;
+        while ((pictureMatch = pictureRegex.exec(linkedPageContent)) !== null) {
+            const decodedUrl = decodeHtmlEntities(pictureMatch[1]);
+            if (decodedUrl && !imageUrls.includes(decodedUrl)) {
+                imageUrls.push(decodedUrl);
+                linkedPageUrls.add(decodedUrl);
+                console.log('📸 [LINKED PAGE] Found picture element hero image:', decodedUrl);
+            }
+        }
+
+        // Extract srcset from linked page picture/source elements (get highest quality)
+        const linkedSrcsetRegex = /<source[^>]+srcset=["']([^"']+)["'][^>]*>/gi;
+        let linkedSrcsetMatch;
+        while ((linkedSrcsetMatch = linkedSrcsetRegex.exec(linkedPageContent)) !== null) {
+            const srcsetValue = linkedSrcsetMatch[1];
+            const srcsetEntries = srcsetValue.split(',').map(entry => {
+                const parts = entry.trim().split(' ');
+                return { url: parts[0], width: parseInt(parts[1]) || 0 };
+            });
+            srcsetEntries.sort((a, b) => b.width - a.width);
+            if (srcsetEntries.length > 0 && srcsetEntries[0].url) {
+                const decodedUrl = decodeHtmlEntities(srcsetEntries[0].url);
+                if (!imageUrls.includes(decodedUrl)) {
+                    imageUrls.push(decodedUrl);
+                    linkedPageUrls.add(decodedUrl);
+                    console.log('📸 [LINKED PAGE] Found srcset hero image:', decodedUrl);
+                }
+            }
+        }
+
+        // Extract regular img tags from linked page
+        const linkedImgRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+        let linkedImgMatch;
+        while ((linkedImgMatch = linkedImgRegex.exec(linkedPageContent)) !== null) {
+            const decodedUrl = decodeHtmlEntities(linkedImgMatch[1]);
+            if (decodedUrl && !imageUrls.includes(decodedUrl)) {
+                imageUrls.push(decodedUrl);
+                linkedPageUrls.add(decodedUrl);
+                console.log('📸 [LINKED PAGE] Found img hero image:', decodedUrl);
+            }
+        }
+    }
+
+    console.log(`🔗 Found ${linkedPageUrls.size} images from linked pages (hero images)`);
 
     // First, extract Next.js optimized images (these are usually the main content images)
     const nextImageRegex = /<img[^>]+src=["']([^"']*\/_next\/image\/[^"']*)["'][^>]*>/gi;
@@ -2015,13 +2081,19 @@ function extractImageUrls(htmlContent: string, sourceUrl: string): string[] {
         const srcMatch = imgTag.match(/src=["']([^"']+)["']/i);
         const dataSrcMatch = imgTag.match(/data-src=["']([^"']+)["']/i);
 
-        if (srcMatch && !imageUrls.includes(srcMatch[1])) {
-            imageUrls.push(srcMatch[1]);
-            console.log('📸 Found regular img src:', srcMatch[1]);
+        if (srcMatch) {
+            const decodedUrl = decodeHtmlEntities(srcMatch[1]);
+            if (!imageUrls.includes(decodedUrl)) {
+                imageUrls.push(decodedUrl);
+                console.log('📸 Found regular img src:', decodedUrl);
+            }
         }
-        if (dataSrcMatch && !imageUrls.includes(dataSrcMatch[1])) {
-            imageUrls.push(dataSrcMatch[1]);
-            console.log('📸 Found img data-src:', dataSrcMatch[1]);
+        if (dataSrcMatch) {
+            const decodedUrl = decodeHtmlEntities(dataSrcMatch[1]);
+            if (!imageUrls.includes(decodedUrl)) {
+                imageUrls.push(decodedUrl);
+                console.log('📸 Found img data-src:', decodedUrl);
+            }
         }
     });
 
@@ -2029,9 +2101,10 @@ function extractImageUrls(htmlContent: string, sourceUrl: string): string[] {
     const bgImageRegex = /background-image:\s*url\(["']?([^"')]+)["']?\)/gi;
     let bgMatch;
     while ((bgMatch = bgImageRegex.exec(htmlContent)) !== null) {
-        if (!imageUrls.includes(bgMatch[1])) {
-            imageUrls.push(bgMatch[1]);
-            console.log('📸 Found background image:', bgMatch[1]);
+        const decodedUrl = decodeHtmlEntities(bgMatch[1]);
+        if (!imageUrls.includes(decodedUrl)) {
+            imageUrls.push(decodedUrl);
+            console.log('📸 Found background image:', decodedUrl);
         }
     }
 
@@ -2066,15 +2139,26 @@ function extractImageUrls(htmlContent: string, sourceUrl: string): string[] {
     const uniqueUrls = [...new Set(resolvedUrls)];
 
     // Sort URLs to prioritize car images over price plates/graphics
+    // IMPORTANT: Give huge bonus to images from linked pages (hero images from individual vehicle pages)
     const prioritizedUrls = uniqueUrls.sort((a, b) => {
-        const aScore = getImagePriorityScore(a);
-        const bScore = getImagePriorityScore(b);
+        let aScore = getImagePriorityScore(a);
+        let bScore = getImagePriorityScore(b);
+
+        // +100 bonus for images from linked pages (hero images)
+        if (linkedPageUrls.has(a)) aScore += 100;
+        if (linkedPageUrls.has(b)) bScore += 100;
+
         return bScore - aScore; // Higher score first
     });
 
     console.log(`📸 Extracted ${prioritizedUrls.length} unique images, prioritized by car content likelihood`);
+    console.log(`🔗 ${linkedPageUrls.size} images from linked pages will get +100 bonus`);
     prioritizedUrls.forEach((url, index) => {
-        console.log(`  ${index + 1}. ${url.substring(url.lastIndexOf('/') + 1)} (${getImagePriorityScore(url)} points)`);
+        const baseScore = getImagePriorityScore(url);
+        const linkedBonus = linkedPageUrls.has(url) ? 100 : 0;
+        const totalScore = baseScore + linkedBonus;
+        const linkedTag = linkedPageUrls.has(url) ? ' [LINKED PAGE HERO]' : '';
+        console.log(`  ${index + 1}. ${url.substring(url.lastIndexOf('/') + 1)} (${totalScore} pts = ${baseScore} base + ${linkedBonus} linked)${linkedTag}`);
     });
 
     return prioritizedUrls;
@@ -2133,9 +2217,15 @@ function getImagePriorityScore(url: string): number {
     if (filename.includes('exterior') || filename.includes('front') || filename.includes('side') ||
         filename.includes('rear') || filename.includes('quarter') || filename.includes('angle')) score += 45;
 
-    // HIGH priority - Product/studio shots
+    // HIGH priority - Hero/main images (but prefer lifestyle over studio)
     if (filename.includes('hero') || filename.includes('main') || filename.includes('primary') ||
-        filename.includes('product') || filename.includes('studio') || filename.includes('beauty')) score += 40;
+        filename.includes('product') || filename.includes('beauty')) score += 40;
+
+    // BONUS for lifestyle/environment images (cars with real backgrounds)
+    if (filename.includes('outdoor') || filename.includes('lifestyle') || filename.includes('action') ||
+        filename.includes('driving') || filename.includes('road') || filename.includes('nature') ||
+        filename.includes('scene') || filename.includes('environment') || filename.includes('cover') ||
+        urlLower.includes('lifestyle') || urlLower.includes('outdoor')) score += 35;
 
     // MEDIUM-HIGH priority - Gallery/photo keywords
     if (filename.includes('gallery') || filename.includes('photo') || filename.includes('image') ||
@@ -2172,15 +2262,21 @@ function getImagePriorityScore(url: string): number {
     if (filename.includes('thumb') || filename.includes('small') || filename.includes('mini')) score -= 20;
     if (filename.includes('_s.') || filename.includes('_xs.') || filename.includes('_sm.')) score -= 20;
 
+    // NEGATIVE priority - Studio/transparent/cutout images (prefer lifestyle with backgrounds)
+    if (filename.includes('studio') || filename.includes('cutout') || filename.includes('transparent') ||
+        filename.includes('white-bg') || filename.includes('whitebg') || filename.includes('no-bg') ||
+        filename.includes('nobg') || filename.includes('isolated') || filename.includes('freisteller')) score -= 25;
+
     // Prefer higher resolution images
     if (url.includes('w=3840') || url.includes('1920') || url.includes('2048') || url.includes('4k')) score += 20;
     if (url.includes('w=1200') || url.includes('1080') || url.includes('hd')) score += 15;
     if (url.includes('w=640') || url.includes('w=750') || url.includes('w=828')) score += 8;
 
-    // Prefer certain file types
-    if (filename.endsWith('.jpg') || filename.endsWith('.jpeg')) score += 5;
-    if (filename.endsWith('.webp')) score += 3;
-    if (filename.endsWith('.png') && !filename.includes('logo')) score += 2;
+    // Prefer certain file types - JPG/WEBP usually have real backgrounds, PNG often transparent
+    if (filename.endsWith('.jpg') || filename.endsWith('.jpeg')) score += 10;
+    if (filename.endsWith('.webp')) score += 8;
+    // PNG often indicates transparent/studio images - slight penalty unless it's a specific car photo
+    if (filename.endsWith('.png') && !filename.includes('logo')) score -= 5;
 
     // Bonus for images from known car image paths
     if (urlLower.includes('/models/') || urlLower.includes('/vehicles/') || urlLower.includes('/cars/')) score += 25;
@@ -2598,16 +2694,64 @@ function convertCampaignToCampaignData(campaign: Campaign): CampaignData {
 /**
  * Convert PDF-extracted vehicle (from Claude) to VehicleData format (NEW SCHEMA)
  * This is used in the PDF-PRIMARY flow where PDFs are the main data source
+ *
+ * @param usedImages - Set to track which images have been assigned to avoid duplicates
+ * @param vehicleIndex - Index of this vehicle in the array (for round-robin fallback)
  */
 function convertExtractedVehicleToVehicleData(
     vehicle: ExtractedVehicle,
     sourceUrl: string,
-    availableImages: string[]
+    availableImages: string[],
+    usedImages: Set<string> = new Set(),
+    vehicleIndex: number = 0,
+    linkedPageHeroImages?: Map<string, string>  // Hero images from linked pages (model slug -> URL)
 ): VehicleData {
-    // Try to find a matching image from HTML based on vehicle/brand name
+    // Try to find a matching image - PRIORITY: Hero images from linked pages
     let thumbnail = vehicle.thumbnail || null;
+
+    // FIRST: Check hero images extracted from linked pages (high quality)
+    if (!thumbnail && linkedPageHeroImages && linkedPageHeroImages.size > 0) {
+        const vehicleTitle = vehicle.title?.toLowerCase() || '';
+        const vehicleBrand = vehicle.brand?.toLowerCase() || '';
+
+        // Try different matching strategies for hero images
+        // 1. Exact model match (e.g., "208" for Peugeot 208)
+        const modelMatch = vehicleTitle.match(/\b(\d+|[a-z]+-?\d*)\b/i);
+        if (modelMatch) {
+            const heroUrl = linkedPageHeroImages.get(modelMatch[1].toLowerCase());
+            if (heroUrl) {
+                thumbnail = heroUrl;
+                console.log(`🖼️ [HERO] Matched hero image for "${vehicle.title}" by model "${modelMatch[1]}": ${heroUrl.substring(heroUrl.lastIndexOf('/') + 1)}`);
+            }
+        }
+
+        // 2. Try brand-model slug match (e.g., "peugeot-208")
+        if (!thumbnail) {
+            const brandModelSlug = `${vehicleBrand}-${vehicleTitle}`.replace(/\s+/g, '-').toLowerCase();
+            for (const [slug, url] of linkedPageHeroImages) {
+                if (brandModelSlug.includes(slug) || slug.includes(vehicleTitle.replace(/\s+/g, '-'))) {
+                    thumbnail = url;
+                    console.log(`🖼️ [HERO] Matched hero image for "${vehicle.title}" by slug "${slug}": ${url.substring(url.lastIndexOf('/') + 1)}`);
+                    break;
+                }
+            }
+        }
+
+        // 3. Try partial match on model name
+        if (!thumbnail) {
+            for (const [slug, url] of linkedPageHeroImages) {
+                if (vehicleTitle.includes(slug) || slug.includes(vehicleTitle.split(' ')[0]?.toLowerCase() || '')) {
+                    thumbnail = url;
+                    console.log(`🖼️ [HERO] Matched hero image for "${vehicle.title}" by partial "${slug}": ${url.substring(url.lastIndexOf('/') + 1)}`);
+                    break;
+                }
+            }
+        }
+    }
+
+    // FALLBACK: Try to find a matching image from HTML based on vehicle/brand name
     if (!thumbnail && availableImages.length > 0) {
-        // Try to match image by brand or vehicle name
+        // Try to match image by brand or vehicle name (prioritize unused images)
         const searchTerms = [
             vehicle.brand?.toLowerCase(),
             vehicle.title?.toLowerCase(),
@@ -2615,18 +2759,32 @@ function convertExtractedVehicleToVehicleData(
         ].filter(Boolean);
 
         for (const term of searchTerms) {
+            // First try to find an UNUSED image that matches
             const matchedImage = availableImages.find(img =>
-                img.toLowerCase().includes(term as string)
+                img.toLowerCase().includes(term as string) && !usedImages.has(img)
             );
             if (matchedImage) {
                 thumbnail = matchedImage;
+                usedImages.add(matchedImage);
+                console.log(`🖼️ Matched image for "${vehicle.title}" by term "${term}": ${matchedImage.substring(matchedImage.lastIndexOf('/') + 1)}`);
                 break;
             }
         }
 
-        // Fallback to first image if no match found
+        // Fallback: distribute unique images round-robin to avoid all vehicles getting the same one
         if (!thumbnail) {
-            thumbnail = availableImages[0] || null;
+            // Find an unused image, cycling through available images
+            const unusedImages = availableImages.filter(img => !usedImages.has(img));
+            if (unusedImages.length > 0) {
+                // Use round-robin based on vehicle index
+                thumbnail = unusedImages[vehicleIndex % unusedImages.length];
+                usedImages.add(thumbnail);
+                console.log(`🖼️ Round-robin image for "${vehicle.title}" (index ${vehicleIndex}): ${thumbnail.substring(thumbnail.lastIndexOf('/') + 1)}`);
+            } else if (availableImages.length > 0) {
+                // All images used, fall back to cycling through all images
+                thumbnail = availableImages[vehicleIndex % availableImages.length];
+                console.log(`🖼️ Recycled image for "${vehicle.title}" (index ${vehicleIndex}): ${thumbnail.substring(thumbnail.lastIndexOf('/') + 1)}`);
+            }
         }
     }
 
@@ -3100,13 +3258,36 @@ function resolveImageUrls<T extends Vehicle | Campaign>(data: T | T[], sourceUrl
     }
 
     const resolveUrl = (url: string): string => {
-        if (!url || url.startsWith('http://') || url.startsWith('https://')) {
-            return url;
+        if (!url) return url;
+
+        // Decode HTML entities first (e.g., &amp; -> &)
+        let cleanUrl = url
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'");
+
+        // Check if URL has small resize parameters - strip them to get original
+        // This converts ?width=213&height=119 resized URLs to original image
+        if (cleanUrl.includes('?') && (cleanUrl.includes('width=') || cleanUrl.includes('height='))) {
+            const widthMatch = cleanUrl.match(/[?&]width=(\d+)/i);
+            const urlWidth = widthMatch ? parseInt(widthMatch[1], 10) : 0;
+
+            // If it's a small thumbnail (width < 500), strip params to get original
+            if (urlWidth > 0 && urlWidth < 500) {
+                cleanUrl = cleanUrl.split('?')[0];
+                console.log(`🔧 Stripped resize params from thumbnail URL (was ${urlWidth}px width)`);
+            }
         }
-        if (url.startsWith('/')) {
-            return baseOrigin + url;
+
+        if (cleanUrl.startsWith('http://') || cleanUrl.startsWith('https://')) {
+            return cleanUrl;
         }
-        return url;
+        if (cleanUrl.startsWith('/')) {
+            return baseOrigin + cleanUrl;
+        }
+        return cleanUrl;
     };
 
     if (Array.isArray(data)) {
@@ -3209,7 +3390,8 @@ export async function processHtmlWithSmartFactCheck(
         label?: string;
     },
     scraperPdfLinks?: { url: string; type: string; foundOnPage: string }[],  // PDF links from scraper
-    onProgress?: ProgressCallback  // Optional callback for streaming progress updates
+    onProgress?: ProgressCallback,  // Optional callback for streaming progress updates
+    linkedPageHeroImages?: Map<string, string>  // Hero images extracted from linked pages (model slug -> image URL)
 ): Promise<EnhancedProcessedResult> {
     // Smart decision logic for enabling fact-checking
     const shouldFactCheck =
@@ -3465,8 +3647,15 @@ export async function processHtmlWithSmartFactCheck(
         const availableImages = extractImageUrls(htmlContent, sourceUrl);
         console.log(`🖼️ Found ${availableImages.length} images in HTML for matching`);
 
+        // Track used images to avoid assigning the same image to multiple vehicles
+        const usedImages = new Set<string>();
+
         // Convert PDF-extracted vehicles to VehicleData format
-        const pdfVehicleData: VehicleData[] = pdfExtractedVehicles.map(v => convertExtractedVehicleToVehicleData(v, sourceUrl, availableImages));
+        // Pass usedImages set and index to distribute unique images across vehicles
+        // Pass linkedPageHeroImages for high-quality hero image matching
+        const pdfVehicleData: VehicleData[] = pdfExtractedVehicles.map((v, index) =>
+            convertExtractedVehicleToVehicleData(v, sourceUrl, availableImages, usedImages, index, linkedPageHeroImages)
+        );
 
         // Create result with PDF vehicles as primary data
         result = {

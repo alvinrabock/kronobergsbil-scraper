@@ -556,6 +556,14 @@ VARIANT NAMING EXAMPLES:
 
 KEY: Same motor in different trims = DIFFERENT variants! Extract ALL of them.
 
+PEUGEOT PDF FORMAT (CRITICAL - DO NOT MISS VARIANTS):
+Peugeot PDFs organize variants by trim level sections (STYLE, ALLURE, GT).
+Each section has MULTIPLE motors. You MUST extract ALL motors from ALL sections:
+- STYLE section: PureTech, Hybrid, Electric → 3 variants (Style PureTech, Style Hybrid, Style Electric)
+- ALLURE section: PureTech, Hybrid, Electric → 3 variants (Allure PureTech, Allure Hybrid, Allure Electric)
+- GT section: Electric → 1 variant (GT Electric)
+Total for 208: 7 variants. If you extracted fewer, you MISSED some. Go back and check!
+
 EXTRACTION PRIORITY:
 1. Model names and trim levels
 2. Pricing (purchase price, leasing, financing)
